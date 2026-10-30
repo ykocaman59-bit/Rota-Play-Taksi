@@ -140,7 +140,7 @@ class TaxiService : Service() {
                 "ride_cancelled" -> {
                     TaxiStore.current = null; TaxiStore.incoming = null
                     TaxiStore.message = "Yolcu yolculuğu iptal etti"
-                    TaxiStore.setPhase("")
+                    TaxiStore.changePhase("")
                 }
             }
         } catch (e: Exception) { }

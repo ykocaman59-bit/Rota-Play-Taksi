@@ -44,7 +44,7 @@ object TaxiStore {
     var onPhaseChanged: (() -> Unit)? = null
     private val main = Handler(Looper.getMainLooper())
 
-    fun setPhase(p: String) { phase = p; main.post { onPhaseChanged?.invoke() } }
+    fun changePhase(p: String) { phase = p; main.post { onPhaseChanged?.invoke() } }
 
     // ---- Kalıcı oturum ----
     private fun prefs(c: Context) = c.getSharedPreferences("taxi", Context.MODE_PRIVATE)
@@ -61,7 +61,7 @@ object TaxiStore {
     }
     fun logout(c: Context) {
         driverId = ""; apiKey = ""; name = ""; plate = ""; status = ""; rating = null; online = false
-        incoming = null; current = null; setPhase("")
+        incoming = null; current = null; changePhase("")
         prefs(c).edit().clear().apply()
     }
 
@@ -110,7 +110,7 @@ object TaxiStore {
             if (current == null && !j.isNull("activeRide")) {
                 val a = j.getJSONObject("activeRide")
                 current = rideFrom(a)
-                setPhase(if (a.getString("status") == "accepted") "to_pickup" else "on_trip")
+                changePhase(if (a.getString("status") == "accepted") "to_pickup" else "on_trip")
             }
         } catch (e: Exception) { fail(e) }
     }
@@ -120,7 +120,7 @@ object TaxiStore {
         try {
             call("POST", dp("/rides/${r.id}/accept"), JSONObject())
             incoming = null; current = r; message = ""
-            setPhase("to_pickup")
+            changePhase("to_pickup")
             launchYandex(ctx, r.pLat, r.pLon)          // yolcunun konumuna rota
         } catch (e: Exception) { fail(e); incoming = null }
     }
@@ -129,7 +129,7 @@ object TaxiStore {
         bg {
             try {
                 call("POST", dp("/rides/${r.id}/pickup"), JSONObject())
-                setPhase("on_trip")
+                changePhase("on_trip")
                 launchYandex(ctx, r.dLat, r.dLon)      // yolcunun gideceği adrese rota
             } catch (e: Exception) { fail(e) }
         }
@@ -140,12 +140,12 @@ object TaxiStore {
         bg {
             try {
                 call("POST", dp("/rides/${r.id}/cancel"), JSONObject())
-                current = null; message = "Yolculuğu iptal ettiniz"; setPhase("")
+                current = null; message = "Yolculuğu iptal ettiniz"; changePhase("")
             } catch (e: Exception) { fail(e) }
         }
     }
     fun requestFinish(ctx: Context) {
-        setPhase("finish"); openTaxi = true
+        changePhase("finish"); openTaxi = true
         ctx.startActivity(Intent(ctx, MainActivity::class.java).addFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
     }
@@ -155,7 +155,7 @@ object TaxiStore {
         bg {
             try {
                 call("POST", dp("/rides/${r.id}/complete"), JSONObject().put("fare", fare))
-                setPhase("rate"); done(null)
+                changePhase("rate"); done(null)
             } catch (e: Exception) { done(if (e is ApiError) e.message else "Sunucuya bağlanılamadı") }
         }
     }
@@ -164,7 +164,7 @@ object TaxiStore {
         bg {
             try { if (r != null && stars > 0) call("POST", dp("/rides/${r.id}/rate"), JSONObject().put("rating", stars)) }
             catch (e: Exception) { }
-            current = null; message = "Yolculuk tamamlandı"; setPhase("")
+            current = null; message = "Yolculuk tamamlandı"; changePhase("")
             refreshMe()
             main.post(done)
         }
