@@ -1,1 +1,82 @@
+<!doctype html>
+<html lang="tr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RotaPlay Taksi</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+:root{--ink:#14161a;--panel:#1d2026;--line:#2c3038;--text:#f1f1ee;--mute:#9aa0aa;--cab:#ffc20e;--ok:#46c37b;--bad:#ff6b5e}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--ink);color:var(--text);font:16px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+#map{position:absolute;inset:0}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--panel);border-radius:20px 20px 0 0;padding:18px 18px calc(18px + env(safe-area-inset-bottom));z-index:500;max-width:520px;margin:auto;box-shadow:0 -8px 30px #0008}
+h1{font-size:20px;margin:0 0 4px}p{margin:4px 0;color:var(--mute)}
+input{width:100%;padding:13px 14px;margin:6px 0;border-radius:12px;border:1px solid var(--line);background:var(--ink);color:var(--text);font:inherit}
+input:focus{outline:2px solid var(--cab);border-color:transparent}
+button{width:100%;padding:15px;margin-top:10px;border:0;border-radius:14px;background:var(--cab);color:#1a1400;font:700 17px inherit;cursor:pointer}
+button.ghost{background:transparent;color:var(--mute);border:1px solid var(--line);font-weight:500}
+button:focus-visible{outline:3px solid #fff}
+.row{display:flex;gap:8px}.row input{flex:1}.row button{width:auto;margin:6px 0;padding:0 16px}
+.big{font-size:34px;font-weight:800;color:var(--cab)}.plate{display:inline-block;background:var(--cab);color:#1a1400;font-weight:800;padding:2px 10px;border-radius:6px;letter-spacing:1px}
+.stars{display:flex;gap:6px;justify-content:center;margin:10px 0}.stars button{width:48px;margin:0;padding:8px;background:var(--ink);color:var(--mute);font-size:24px}.stars button.on{color:var(--cab)}
+.err{color:var(--bad);min-height:1.2em}.hide{display:none}
+#results{background:var(--ink);border-radius:12px;margin-top:4px}#results div{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+</style></head><body>
+<div id="map"></div>
+<div class="sheet" id="sheet"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+const $=s=>document.querySelector(s), sheet=$('#sheet');
+const map=L.map('map',{zoomControl:false}).setView([41.0082,28.9784],12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+const icon=c=>L.divIcon({className:'',html:`<div style="width:18px;height:18px;border-radius:50%;background:${c};border:3px solid #fff;box-shadow:0 0 6px #000a"></div>`,iconSize:[18,18]});
+let me=null,dest=null,meM,destM,drvM,poll,ride=JSON.parse(localStorage.getItem('ride')||'null'),stars=0;
+const store=()=>localStorage.setItem('ride',JSON.stringify(ride));
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const call=(u,o)=>fetch(u,o).then(async r=>{const j=await r.json();if(!r.ok)throw new Error(j.error||'Hata');return j});
+const post=(u,b)=>call(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});
 
+function locate(){navigator.geolocation?.getCurrentPosition(p=>{me={lat:p.coords.latitude,lon:p.coords.longitude,text:'Konumum'};
+  meM?.remove();meM=L.marker([me.lat,me.lon],{icon:icon('#46c37b')}).addTo(map);if(!ride)map.setView([me.lat,me.lon],15)},
+  ()=>{$('#err').textContent='Konum izni verin ki taksi sizi bulabilsin.'},{enableHighAccuracy:true})}
+function setDest(lat,lon,text){dest={lat,lon,text};destM?.remove();destM=L.marker([lat,lon],{icon:icon('#ffc20e')}).addTo(map);$('#destTxt').textContent=text||'Haritada seçilen nokta'}
+
+function viewForm(){
+  sheet.innerHTML=`<h1>Nereye gidiyorsunuz?</h1><p>Varış noktasını arayın veya haritada dokunun.</p>
+  <div class="row"><input id="q" placeholder="Adres ara"><button id="go" class="ghost">Ara</button></div><div id="results"></div>
+  <p id="destTxt" style="color:var(--text)">${dest?esc(dest.text):''}</p>
+  <input id="name" placeholder="Adınız" value="${esc(localStorage.getItem('pn')||'')}"><input id="phone" type="tel" placeholder="Telefon" value="${esc(localStorage.getItem('pp')||'')}">
+  <p class="err" id="err"></p><button id="call">Taksi çağır</button>`;
+  $('#go').onclick=search;$('#q').onkeydown=e=>e.key==='Enter'&&search();$('#call').onclick=request;locate();
+}
+async function search(){const q=$('#q').value.trim();if(!q)return;
+  try{const r=await call('https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=tr&q='+encodeURIComponent(q));
+  $('#results').innerHTML=r.map((x,i)=>`<div data-i="${i}">${esc(x.display_name)}</div>`).join('')||'<div>Sonuç yok</div>';
+  $('#results').onclick=e=>{const i=e.target.dataset.i;if(i==null)return;const x=r[i];setDest(+x.lat,+x.lon,x.display_name.split(',').slice(0,2).join(','));map.setView([x.lat,x.lon],15);$('#results').innerHTML=''}}
+  catch{ $('#err').textContent='Arama yapılamadı, haritada dokunarak seçin.'}}
+map.on('click',e=>{if(!ride&&$('#destTxt'))setDest(e.latlng.lat,e.latlng.lng,'Haritada seçilen nokta')});
+async function request(){
+  const name=$('#name').value.trim(),phone=$('#phone').value.trim();
+  if(!me)return $('#err').textContent='Konumunuz alınamadı.';if(!dest)return $('#err').textContent='Varış noktasını seçin.';
+  if(!name||!phone)return $('#err').textContent='Ad ve telefon girin.';
+  localStorage.setItem('pn',name);localStorage.setItem('pp',phone);
+  try{const r=await post('/api/rides',{name,phone,pickup:me,dest});ride={id:r.id,token:r.token};store();start()}catch(e){$('#err').textContent=e.message}}
+
+function start(){clearInterval(poll);tick();poll=setInterval(tick,3000)}
+async function tick(){let r;try{r=await call(`/api/rides/${ride.id}?token=${ride.token}`)}catch{return reset()}
+  if(!r.driver&&drvM){drvM.remove();drvM=null}
+  if(r.driver?.lat!=null){drvM?drvM.setLatLng([r.driver.lat,r.driver.lon]):drvM=L.marker([r.driver.lat,r.driver.lon],{icon:icon('#ffc20e')}).addTo(map)}
+  const d=r.driver;
+  const who=d?`<p><span class="plate">${esc(d.plate)}</span> &nbsp;${esc(d.name)}${d.rating?` · ★ ${d.rating}`:''}</p>`:'';
+  if(r.status==='searching')sheet.innerHTML=`<h1>${r.driverCancelled?'Şoför iptal etti':'Yakındaki taksiler aranıyor…'}</h1><p>${r.driverCancelled?'Sizin için yeni bir taksi aranıyor.':'Bir şoför kabul edince burada görünecek.'}</p><button class="ghost" id="cx">Vazgeç</button>`;
+  else if(r.status==='accepted')sheet.innerHTML=`<h1>Taksiniz yolda</h1>${who}<p>Şoför konumunuza geliyor. Haritada canlı görebilirsiniz.</p><button class="ghost" id="cx">İptal et</button>`;
+  else if(r.status==='picked_up')sheet.innerHTML=`<h1>İyi yolculuklar</h1>${who}<p>Varış: ${esc(r.dest.text)}</p>`;
+  else if(r.status==='completed'){clearInterval(poll);
+    sheet.innerHTML=`<h1>Yolculuk bitti</h1><p>Taksimetre tutarı</p><div class="big">${r.fare.toLocaleString('tr-TR',{minimumFractionDigits:2})} ₺</div>${who}
+    ${r.rated?'<p>Puanınız için teşekkürler.</p><button id="nw">Yeni yolculuk</button>':`<p>Şoförü puanlayın</p><div class="stars">${[1,2,3,4,5].map(n=>`<button data-n="${n}">★</button>`).join('')}</div><button id="sv">Puanı gönder</button>`}`;
+    $('.stars')?.addEventListener('click',e=>{const n=+e.target.dataset.n;if(!n)return;stars=n;document.querySelectorAll('.stars button').forEach((b,i)=>b.classList.toggle('on',i<n))});
+    $('#sv')&&($('#sv').onclick=async()=>{if(!stars)return;await post(`/api/rides/${ride.id}/rate`,{token:ride.token,rating:stars}).catch(()=>{});tick()});}
+  else{clearInterval(poll);sheet.innerHTML=`<h1>${r.status==='expired'?'Şu an müsait taksi bulunamadı':'Yolculuk iptal edildi'}</h1><button id="nw">Tekrar dene</button>`}
+  $('#cx')&&($('#cx').onclick=async()=>{await post(`/api/rides/${ride.id}/cancel`,{token:ride.token}).catch(()=>{});tick()});
+  $('#nw')&&($('#nw').onclick=reset)}
+function reset(){clearInterval(poll);localStorage.removeItem('ride');ride=null;dest=null;stars=0;destM?.remove();drvM?.remove();drvM=null;viewForm()}
+ride?start():viewForm();
+</script></body></html>
