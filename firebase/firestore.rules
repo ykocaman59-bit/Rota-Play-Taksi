@@ -1,1 +1,135 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
 
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(uid())); }
+    function driverDoc() { return get(/databases/$(database)/documents/drivers/$(uid())).data; }
+    function isApprovedDriver() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/drivers/$(uid()))
+        && driverDoc().status == 'approved';
+    }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    // Yaklaşık uzaklık (km). Türkiye enlemleri için boylam çarpanı ≈ 0.777.
+    function distKm(aLat, aLon, bLat, bLon) {
+      return math.sqrt(math.pow((aLat - bLat) * 111.2, 2) + math.pow((aLon - bLon) * 111.2 * 0.777, 2));
+    }
+    function okStars(v) { return v is int && v >= 1 && v <= 5; }
+
+    // Yöneticiler: Firebase konsolundan elle eklenir, kimse uygulamadan yönetici olamaz
+    match /admins/{id} {
+      allow read: if signedIn() && uid() == id;
+    }
+
+    // Şoförler: kayıt olur (bekliyor), sadece yönetici onaylar
+    match /drivers/{id} {
+      allow read: if isAdmin() || (signedIn() && uid() == id);
+      allow create: if signedIn() && uid() == id
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'plate', 'status', 'createdAt'])
+        && request.resource.data.status == 'pending'
+        && request.resource.data.name.size() <= 60
+        && request.resource.data.plate.size() <= 20;
+      allow update: if isAdmin();
+    }
+
+    // Yolculuklar
+    match /rides/{rid} {
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.passengerUid == uid())
+        || (signedIn() && resource.data.driverUid == uid())
+        || (isApprovedDriver() && resource.data.status == 'searching');
+
+      // Yolcu talep açar
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['passengerUid', 'passengerName', 'status', 'pickup', 'dest', 'createdAt', 'declined', 'driverUid'])
+        && request.resource.data.passengerUid == uid()
+        && request.resource.data.status == 'searching'
+        && request.resource.data.driverUid == null
+        && request.resource.data.declined.size() == 0
+        && request.resource.data.passengerName.size() <= 60;
+
+      allow update: if isAdmin()
+
+        // yolcu: iptal / süre doldu
+        || (signedIn() && resource.data.passengerUid == uid()
+            && resource.data.status in ['searching', 'accepted']
+            && request.resource.data.status in ['cancelled', 'expired']
+            && changed().hasOnly(['status']))
+
+        // yolcu: şoförü puanlar (bir kez)
+        || (signedIn() && resource.data.passengerUid == uid()
+            && resource.data.status == 'completed'
+            && !('driverRating' in resource.data)
+            && changed().hasOnly(['driverRating'])
+            && okStars(request.resource.data.driverRating))
+
+        // şoför: talebi kabul eder (yalnızca hâlâ aranıyorsa ve 5 km içindeyse; ilk yazan kazanır)
+        || (isApprovedDriver()
+            && resource.data.status == 'searching'
+            && request.resource.data.status == 'accepted'
+            && request.resource.data.driverUid == uid()
+            && request.resource.data.driverName == driverDoc().name
+            && request.resource.data.driverPlate == driverDoc().plate
+            && !(uid() in resource.data.declined)
+            && request.resource.data.driverLat is number && request.resource.data.driverLon is number
+            && distKm(request.resource.data.driverLat, request.resource.data.driverLon, resource.data.pickup.lat, resource.data.pickup.lon) <= 5.5
+            && changed().hasOnly(['status', 'driverUid', 'driverName', 'driverPlate', 'driverPhone', 'acceptedAt', 'driverCancelled', 'driverLat', 'driverLon']))
+
+        // şoför: yolcuyu almadan önce iptal eder, talep yeniden aranır
+        || (signedIn() && resource.data.driverUid == uid()
+            && resource.data.status == 'accepted'
+            && request.resource.data.status == 'searching'
+            && request.resource.data.driverUid == null
+            && uid() in request.resource.data.declined
+            && changed().hasOnly(['status', 'driverUid', 'driverName', 'driverPlate', 'driverPhone', 'driverCancelled', 'declined', 'createdAt', 'driverLat', 'driverLon']))
+
+        // şoför: yolcuyu aldı
+        || (signedIn() && resource.data.driverUid == uid()
+            && resource.data.status == 'accepted'
+            && request.resource.data.status == 'picked_up'
+            && changed().hasOnly(['status', 'pickedAt']))
+
+        // şoför: canlı konum
+        || (signedIn() && resource.data.driverUid == uid()
+            && resource.data.status in ['accepted', 'picked_up']
+            && changed().hasOnly(['driverLat', 'driverLon']))
+
+        // şoför: yolculuğu bitirir, taksimetre tutarını yazar
+        || (signedIn() && resource.data.driverUid == uid()
+            && resource.data.status == 'picked_up'
+            && request.resource.data.status == 'completed'
+            && request.resource.data.fare is number
+            && request.resource.data.fare >= 0 && request.resource.data.fare <= 100000
+            && changed().hasOnly(['status', 'fare', 'doneAt']))
+
+        // şoför: yolcuyu puanlar (bir kez)
+        || (signedIn() && resource.data.driverUid == uid()
+            && resource.data.status == 'completed'
+            && !('passengerRating' in resource.data)
+            && changed().hasOnly(['passengerRating'])
+            && okStars(request.resource.data.passengerRating));
+
+      // Yolcunun telefonu: sadece kendisi, atanan şoför ve yönetici görür
+      match /private/{doc} {
+        allow create: if signedIn()
+          && get(/databases/$(database)/documents/rides/$(rid)).data.passengerUid == uid()
+          && request.resource.data.keys().hasOnly(['name', 'phone']);
+        allow read: if isAdmin()
+          || (signedIn() && get(/databases/$(database)/documents/rides/$(rid)).data.passengerUid == uid())
+          || (signedIn() && get(/databases/$(database)/documents/rides/$(rid)).data.driverUid == uid());
+      }
+    }
+
+    // Hareket kayıtları: herkes sadece kendi adına yazar, yalnızca yönetici okur
+    match /events/{id} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['uid', 'who', 'name', 'detail', 't'])
+        && request.resource.data.uid == uid()
+        && request.resource.data.name.size() <= 40
+        && request.resource.data.detail.size() <= 200;
+      allow read: if isAdmin();
+    }
+  }
+}
