@@ -25,6 +25,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         TaxiStore.load(applicationContext)
+        TaxiStore.track("uygulama_acildi")
 
         // Tam ekran (immersive) + ekran açık kalsın
         WindowCompat.setDecorFitsSystemWindows(window, false)

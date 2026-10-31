@@ -23,23 +23,17 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Button
 import androidx.core.app.NotificationCompat
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
- * Şoför çevrimiçiyken çalışır: sunucuya canlı bağlanır (SSE), konumu gönderir,
+ * Şoför çevrimiçiyken çalışır: Firebase'den talepleri 6 sn'de bir yoklar, konumu izler,
  * talep gelince bildirim verir, Yandex üzerinde "Yolcuyu aldım / Bitir" düğmesini gösterir.
  */
 class TaxiService : Service() {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var running = false
     private var overlay: Button? = null
-    private var lastSend = 0L
     private val locListener = LocationListener { l: Location ->
         TaxiStore.lat = l.latitude; TaxiStore.lon = l.longitude
-        val now = System.currentTimeMillis()
-        if (running && now - lastSend > 5000) { lastSend = now; TaxiStore.bg { sendLocation() } }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -65,7 +59,7 @@ class TaxiService : Service() {
         if (!running) {
             running = true
             startLocation()
-            Thread { streamLoop() }.start()
+            Thread { pollLoop() }.start()
         }
         return START_NOT_STICKY
     }
@@ -79,71 +73,20 @@ class TaxiService : Service() {
                 lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 8000L, 30f, locListener, Looper.getMainLooper())
         } catch (e: SecurityException) { TaxiStore.message = "Konum izni gerekli" }
     }
-    private fun body(): JSONObject {
-        val b = JSONObject()
-        TaxiStore.lat?.let { b.put("lat", it) }; TaxiStore.lon?.let { b.put("lon", it) }
-        return b
-    }
-    private fun sendLocation() {
-        try { TaxiStore.call("POST", "/api/driver/${TaxiStore.driverId}/location", body()) } catch (e: Exception) { }
-    }
-    private fun sendOnline(on: Boolean) {
-        try { TaxiStore.call("POST", "/api/driver/${TaxiStore.driverId}/online", body().put("online", on)) } catch (e: Exception) { }
-    }
 
-    // ---- Sunucu akışı ----
-    private fun streamLoop() {
+    // ---- Talepleri 6 saniyede bir sorar (Firebase Spark kotasına uygun) ----
+    private fun pollLoop() {
         while (running) {
-            var c: HttpURLConnection? = null
             try {
-                c = URL("$TAXI_SERVER/api/driver/${TaxiStore.driverId}/stream").openConnection() as HttpURLConnection
-                c.setRequestProperty("Authorization", "Bearer ${TaxiStore.apiKey}")
-                c.setRequestProperty("Accept", "text/event-stream")
-                c.connectTimeout = 10000
-                c.readTimeout = 60000          // sunucu 20 sn'de bir kalp atışı yollar
-                val code = c.responseCode
-                if (code != 200) {
-                    TaxiStore.message = if (code == 403) "Hesabınız henüz onaylanmadı" else "Bağlanılamadı ($code)"
-                    if (code in 401..403) { main.post { TaxiStore.online = false; stopSelf() }; return }
-                } else {
-                    var ev = ""
-                    val rd = c.inputStream.bufferedReader()
-                    while (running) {
-                        val line = rd.readLine() ?: break
-                        when {
-                            line.startsWith("event:") -> ev = line.substring(6).trim()
-                            line.startsWith("data:") -> handle(ev, line.substring(5).trim())
-                            line.isEmpty() -> ev = ""
-                        }
-                    }
-                }
-            } catch (e: Exception) { /* bağlantı koptu, yeniden dene */ }
-            finally { c?.disconnect() }
-            if (running) try { Thread.sleep(3000) } catch (e: InterruptedException) { }
+                val fresh = TaxiStore.pollOnce()
+                if (fresh != null) main.post { notifyRide(fresh) }
+                if (TaxiStore.message.startsWith("Bağlanılamadı")) TaxiStore.message = ""
+            } catch (e: ApiError) {
+                TaxiStore.message = e.message ?: "Hata"
+                if (e.code == 401) { main.post { TaxiStore.online = false; stopSelf() }; return }
+            } catch (e: Exception) { TaxiStore.message = "Bağlanılamadı, tekrar deneniyor…" }
+            try { Thread.sleep(6000) } catch (e: InterruptedException) { }
         }
-    }
-
-    private fun handle(ev: String, data: String) {
-        try {
-            when (ev) {
-                "hello" -> { TaxiStore.message = ""; sendOnline(true) }
-                "ride" -> {
-                    if (TaxiStore.current != null) return
-                    val r = TaxiStore.rideFrom(JSONObject(data))
-                    TaxiStore.incoming = r
-                    main.post { notifyRide(r) }
-                }
-                "ride_gone" -> {
-                    val id = JSONObject(data).getString("id")
-                    if (TaxiStore.incoming?.id == id) TaxiStore.incoming = null
-                }
-                "ride_cancelled" -> {
-                    TaxiStore.current = null; TaxiStore.incoming = null
-                    TaxiStore.message = "Yolcu yolculuğu iptal etti"
-                    TaxiStore.changePhase("")
-                }
-            }
-        } catch (e: Exception) { }
     }
 
     private fun openApp(): PendingIntent = PendingIntent.getActivity(
@@ -217,7 +160,7 @@ class TaxiService : Service() {
         (getSystemService(LOCATION_SERVICE) as LocationManager).removeUpdates(locListener)
         removeOverlay()
         TaxiStore.online = false
-        if (TaxiStore.driverId.isNotEmpty()) TaxiStore.bg { sendOnline(false) }
+        TaxiStore.incoming = null
         super.onDestroy()
     }
 }

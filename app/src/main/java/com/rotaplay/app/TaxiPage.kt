@@ -86,14 +86,10 @@ private fun TaxiAuth() {
             busy = true; err = ""
             TaxiStore.bg {
                 try {
-                    val b = JSONObject().put("phone", phone.trim()).put("password", pass)
-                    val r = if (register)
-                        TaxiStore.call("POST", "/api/driver/register", b.put("name", name.trim()).put("plate", plate.trim()), false)
-                    else TaxiStore.call("POST", "/api/driver/login", b, false)
-                    TaxiStore.setLogin(ctx, r.getString("id"), r.getString("apiKey"))
-                    TaxiStore.refreshMe()
+                    if (register) TaxiStore.register(ctx, name.trim(), phone.trim(), plate.trim(), pass)
+                    else TaxiStore.login(ctx, phone.trim(), pass)
                 } catch (e: ApiError) { err = e.message ?: "Hata" }
-                catch (e: Exception) { err = "Sunucuya bağlanılamadı" }
+                catch (e: Exception) { err = "Bağlanılamadı, internetinizi kontrol edin" }
                 busy = false
             }
         }) { Text(if (busy) "Bekleyin…" else if (register) "Kayıt ol" else "Giriş yap", fontSize = 17.sp) }
@@ -175,7 +171,7 @@ private fun TaxiMain(onHome: () -> Unit) {
                 Text("Varış: ${inc.dText}")
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = { s.accept(app, inc) }, modifier = Modifier.weight(1f).height(56.dp)) { Text("Kabul et", fontSize = 18.sp) }
-                    OutlinedButton(onClick = { s.incoming = null }, modifier = Modifier.weight(1f).height(56.dp)) { Text("Reddet", fontSize = 18.sp) }
+                    OutlinedButton(onClick = { s.reject(inc) }, modifier = Modifier.weight(1f).height(56.dp)) { Text("Reddet", fontSize = 18.sp) }
                 }
             }
 

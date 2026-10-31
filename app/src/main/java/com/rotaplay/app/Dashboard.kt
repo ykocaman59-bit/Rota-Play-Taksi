@@ -94,6 +94,12 @@ fun Dashboard() {
     var webTitle by rememberSaveable { mutableStateOf("") }
     var webUrl by rememberSaveable { mutableStateOf("") }
 
+    // Hangi sekmeye girildiyse hareket kaydına yaz
+    LaunchedEffect(tab) {
+        val names = listOf("ana_ekran", "uygulamalar", "harita", "telefon", "web_uygulama", "taksi")
+        TaxiStore.track("sekme", names.getOrElse(tab) { "?" })
+    }
+
     // Taksi servisi öne getirince (talep geldi / yolculuk bitti) taksi sekmesini aç
     LaunchedEffect(TaxiStore.openTaxi) {
         if (TaxiStore.openTaxi) { tab = 5; TaxiStore.openTaxi = false }

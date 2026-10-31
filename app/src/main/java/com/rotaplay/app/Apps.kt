@@ -111,6 +111,7 @@ private fun landscapeWanted(ctx: Context) =
 
 /** Uygulamayı açar; yatay mod açıksa yatay zorlar ve üstte RotaPlay ev düğmesini gösterir. */
 fun launchApp(ctx: Context, pkg: String) {
+    TaxiStore.track("uygulama_ac", pkg)
     runCatching {
         val i = ctx.packageManager.getLaunchIntentForPackage(pkg) ?: return
         if (landscapeWanted(ctx) && Settings.System.canWrite(ctx)) setSystemLandscape(ctx, true)
