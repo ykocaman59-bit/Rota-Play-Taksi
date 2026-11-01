@@ -9,21 +9,34 @@ service cloud.firestore {
     function isApprovedDriver() {
       return signedIn()
         && exists(/databases/$(database)/documents/drivers/$(uid()))
-        && driverDoc().status == 'approved'
-        && driverDoc().docsStatus == 'submitted'
-        && driverDoc().identityPath is string && driverDoc().identityPath.size() > 0
-        && driverDoc().licensePath is string && driverDoc().licensePath.size() > 0
-        && driverDoc().registrationFrontPath is string && driverDoc().registrationFrontPath.size() > 0
-        && driverDoc().registrationBackPath is string && driverDoc().registrationBackPath.size() > 0;
+        && driverDoc().status == 'approved';
     }
     function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function okStars(v) { return v is int && v >= 1 && v <= 5; }
+
     // Yaklaşık uzaklık (km). Türkiye enlemleri için boylam çarpanı ≈ 0.777.
     function distKm(aLat, aLon, bLat, bLon) {
       return math.sqrt(math.pow((aLat - bLat) * 111.2, 2) + math.pow((aLon - bLon) * 111.2 * 0.777, 2));
     }
-    function okStars(v) { return v is int && v >= 1 && v <= 5; }
 
-    // Yöneticiler: Firebase konsolundan elle eklenir, kimse uygulamadan yönetici olamaz
+    // Şoför seviyesine göre talep alma yarıçapı (km)
+    function levelRadius(c, a) {
+      return (c >= 100 && a >= 4.8) ? 15
+        : ((c >= 60 && a >= 4.6) ? 12
+        : ((c >= 30 && a >= 4.3) ? 8
+        : ((c >= 10 && a >= 4.0) ? 5 : 3)));
+    }
+    function myRadius() {
+      return exists(/databases/$(database)/documents/driverStats/$(uid()))
+        ? levelRadius(get(/databases/$(database)/documents/driverStats/$(uid())).data.count,
+                      get(/databases/$(database)/documents/driverStats/$(uid())).data.avg)
+        : 3;
+    }
+
+    function rideBefore(rid) { return get(/databases/$(database)/documents/rides/$(rid)).data; }
+    function rideAfter(rid) { return getAfter(/databases/$(database)/documents/rides/$(rid)).data; }
+
+    // Yöneticiler: Firebase konsolundan elle eklenir
     match /admins/{id} {
       allow read: if signedIn() && uid() == id;
     }
@@ -32,33 +45,72 @@ service cloud.firestore {
     match /drivers/{id} {
       allow read: if isAdmin() || (signedIn() && uid() == id);
       allow create: if signedIn() && uid() == id
-        && request.resource.data.keys().hasOnly(['name', 'phone', 'plate', 'status', 'createdAt', 'identityPath', 'licensePath', 'registrationFrontPath', 'registrationBackPath', 'docsStatus', 'autoCheck', 'plateOcrResult'])
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'plate', 'status', 'createdAt'])
         && request.resource.data.status == 'pending'
         && request.resource.data.name.size() <= 60
-        && request.resource.data.plate.size() <= 20
-        && request.resource.data.identityPath == ''
-        && request.resource.data.licensePath == ''
-        && request.resource.data.registrationFrontPath == ''
-        && request.resource.data.registrationBackPath == ''
-        && request.resource.data.docsStatus == 'missing'
-        && request.resource.data.autoCheck == 'not_run'
-        && request.resource.data.plateOcrResult == 'not_run';
-      // Şoför yalnızca kendi belge dosyalarının yolunu ve otomatik ön kontrol durumunu güncelleyebilir.
-      // status, ad, telefon ve plaka yalnızca yönetici tarafından değiştirilebilir.
-      allow update: if isAdmin()
-        || (signedIn() && uid() == id
-            && changed().hasOnly(['identityPath', 'licensePath', 'registrationFrontPath', 'registrationBackPath', 'docsStatus', 'autoCheck', 'plateOcrResult'])
-            && request.resource.data.status == resource.data.status
-            && request.resource.data.name == resource.data.name
-            && request.resource.data.phone == resource.data.phone
-            && request.resource.data.plate == resource.data.plate
-            && request.resource.data.identityPath is string
-            && request.resource.data.licensePath is string
-            && request.resource.data.registrationFrontPath is string
-            && request.resource.data.registrationBackPath is string
-            && request.resource.data.docsStatus in ['incomplete', 'submitted']
-            && request.resource.data.autoCheck in ['incomplete', 'suspicious', 'review_required', 'manual_review']
-            && request.resource.data.plateOcrResult in ['not_run', 'match', 'mismatch', 'unreadable']);
+        && request.resource.data.plate.size() <= 20;
+      allow update: if isAdmin();
+    }
+
+    // Yolcular: yalnızca e-postasını doğrulamış hesap profil açabilir
+    match /passengers/{pid} {
+      allow read: if isAdmin() || (signedIn() && uid() == pid);
+      allow create: if signedIn() && uid() == pid
+        && request.auth.token.email_verified == true
+        && request.resource.data.keys().hasOnly(['firstName', 'lastName', 'phone', 'email', 'createdAt'])
+        && request.resource.data.firstName.size() > 0 && request.resource.data.firstName.size() <= 40
+        && request.resource.data.lastName.size() > 0 && request.resource.data.lastName.size() <= 40
+        && request.resource.data.phone.size() <= 20
+        && request.resource.data.email == request.auth.token.email;
+      allow update: if signedIn() && uid() == pid && changed().hasOnly(['phone']);
+    }
+
+    // Puan özetleri: herkes (giriş yapmış) okuyabilir; yalnızca puan verme işlemiyle, tek tek artırılarak yazılır
+    match /driverStats/{did} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['sum', 'count', 'avg', 'lastRide', 'name'])
+        && rideBefore(request.resource.data.lastRide).driverUid == did
+        && rideBefore(request.resource.data.lastRide).passengerUid == uid()
+        && rideBefore(request.resource.data.lastRide).status == 'completed'
+        && !('driverRating' in rideBefore(request.resource.data.lastRide))
+        && request.resource.data.count == 1
+        && request.resource.data.sum == rideAfter(request.resource.data.lastRide).driverRating
+        && math.abs(request.resource.data.avg - request.resource.data.sum) < 0.001
+        && request.resource.data.name == rideBefore(request.resource.data.lastRide).driverName;
+      allow update: if signedIn()
+        && request.resource.data.keys().hasOnly(['sum', 'count', 'avg', 'lastRide', 'name'])
+        && rideBefore(request.resource.data.lastRide).driverUid == did
+        && rideBefore(request.resource.data.lastRide).passengerUid == uid()
+        && rideBefore(request.resource.data.lastRide).status == 'completed'
+        && !('driverRating' in rideBefore(request.resource.data.lastRide))
+        && request.resource.data.count == resource.data.count + 1
+        && request.resource.data.sum == resource.data.sum + rideAfter(request.resource.data.lastRide).driverRating
+        && math.abs(request.resource.data.avg - (request.resource.data.sum * 1.0) / request.resource.data.count) < 0.001
+        && request.resource.data.name == resource.data.name;
+    }
+    match /passengerStats/{pid} {
+      allow read: if signedIn();
+      allow create: if isApprovedDriver()
+        && request.resource.data.keys().hasOnly(['sum', 'count', 'avg', 'lastRide', 'name'])
+        && rideBefore(request.resource.data.lastRide).passengerUid == pid
+        && rideBefore(request.resource.data.lastRide).driverUid == uid()
+        && rideBefore(request.resource.data.lastRide).status == 'completed'
+        && !('passengerRating' in rideBefore(request.resource.data.lastRide))
+        && request.resource.data.count == 1
+        && request.resource.data.sum == rideAfter(request.resource.data.lastRide).passengerRating
+        && math.abs(request.resource.data.avg - request.resource.data.sum) < 0.001
+        && request.resource.data.name == rideBefore(request.resource.data.lastRide).passengerName;
+      allow update: if isApprovedDriver()
+        && request.resource.data.keys().hasOnly(['sum', 'count', 'avg', 'lastRide', 'name'])
+        && rideBefore(request.resource.data.lastRide).passengerUid == pid
+        && rideBefore(request.resource.data.lastRide).driverUid == uid()
+        && rideBefore(request.resource.data.lastRide).status == 'completed'
+        && !('passengerRating' in rideBefore(request.resource.data.lastRide))
+        && request.resource.data.count == resource.data.count + 1
+        && request.resource.data.sum == resource.data.sum + rideAfter(request.resource.data.lastRide).passengerRating
+        && math.abs(request.resource.data.avg - (request.resource.data.sum * 1.0) / request.resource.data.count) < 0.001
+        && request.resource.data.name == resource.data.name;
     }
 
     // Yolculuklar
@@ -68,8 +120,10 @@ service cloud.firestore {
         || (signedIn() && resource.data.driverUid == uid())
         || (isApprovedDriver() && resource.data.status == 'searching');
 
-      // Yolcu talep açar
+      // Yolcu talep açar (e-postası doğrulanmış ve profili olan hesap)
       allow create: if signedIn()
+        && request.auth.token.email_verified == true
+        && exists(/databases/$(database)/documents/passengers/$(uid()))
         && request.resource.data.keys().hasOnly(['passengerUid', 'passengerName', 'status', 'pickup', 'dest', 'createdAt', 'declined', 'driverUid'])
         && request.resource.data.passengerUid == uid()
         && request.resource.data.status == 'searching'
@@ -92,7 +146,7 @@ service cloud.firestore {
             && changed().hasOnly(['driverRating'])
             && okStars(request.resource.data.driverRating))
 
-        // şoför: talebi kabul eder (yalnızca hâlâ aranıyorsa ve 5 km içindeyse; ilk yazan kazanır)
+        // şoför: talebi kabul eder (hâlâ aranıyorsa ve seviyesinin yarıçapı içindeyse; ilk yazan kazanır)
         || (isApprovedDriver()
             && resource.data.status == 'searching'
             && request.resource.data.status == 'accepted'
@@ -101,7 +155,7 @@ service cloud.firestore {
             && request.resource.data.driverPlate == driverDoc().plate
             && !(uid() in resource.data.declined)
             && request.resource.data.driverLat is number && request.resource.data.driverLon is number
-            && distKm(request.resource.data.driverLat, request.resource.data.driverLon, resource.data.pickup.lat, resource.data.pickup.lon) <= 5.5
+            && distKm(request.resource.data.driverLat, request.resource.data.driverLon, resource.data.pickup.lat, resource.data.pickup.lon) <= myRadius() + 0.5
             && changed().hasOnly(['status', 'driverUid', 'driverName', 'driverPlate', 'driverPhone', 'acceptedAt', 'driverCancelled', 'driverLat', 'driverLon']))
 
         // şoför: yolcuyu almadan önce iptal eder, talep yeniden aranır
