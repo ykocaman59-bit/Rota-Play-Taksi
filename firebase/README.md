@@ -21,3 +21,13 @@ Not: Ayrı bir sunucu olmadığı için şoförün bildirdiği konum telefondan 
 ## Ücretsiz kota (Spark)
 Günde 50.000 okuma, 20.000 yazma, 1 GiB. Şoför uygulaması talepleri 6 sn'de bir sorar: çevrimiçi her saat ≈ 600 okuma.
 10 şoför × günde 8 saat çevrimiçi kotayı doldurur; fazlası için Blaze (kullandıkça öde) planı gerekir.
+
+
+## Şoför belge doğrulama (bu güncelleme)
+
+- Firebase Console → **Build → Storage** → Get started ile Storage'ı etkinleştir.
+- `storage.rules` dosyasını Storage → Rules alanına yayımla.
+- Güncellenmiş `firestore.rules` dosyasını Firestore → Rules alanına yayımla.
+- Storage kuralları yöneticinin `admins/{uid}` Firestore kaydını okur. Firebase Console isterse Storage'ın Firestore'a erişim iznini onayla.
+- Şoför uygulaması dört belgeyi Storage'a yükler. Yönetici fotoğrafları yolcu projesindeki `docs/admin.html` panelinden açar.
+- OCR yalnızca fotoğraftaki yazıyı okumaya çalışır; resmî doğrulama değildir. Son karar yönetici incelemesidir.

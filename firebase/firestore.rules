@@ -9,7 +9,12 @@ service cloud.firestore {
     function isApprovedDriver() {
       return signedIn()
         && exists(/databases/$(database)/documents/drivers/$(uid()))
-        && driverDoc().status == 'approved';
+        && driverDoc().status == 'approved'
+        && driverDoc().docsStatus == 'submitted'
+        && driverDoc().identityPath is string && driverDoc().identityPath.size() > 0
+        && driverDoc().licensePath is string && driverDoc().licensePath.size() > 0
+        && driverDoc().registrationFrontPath is string && driverDoc().registrationFrontPath.size() > 0
+        && driverDoc().registrationBackPath is string && driverDoc().registrationBackPath.size() > 0;
     }
     function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
     // Yaklaşık uzaklık (km). Türkiye enlemleri için boylam çarpanı ≈ 0.777.
@@ -27,11 +32,33 @@ service cloud.firestore {
     match /drivers/{id} {
       allow read: if isAdmin() || (signedIn() && uid() == id);
       allow create: if signedIn() && uid() == id
-        && request.resource.data.keys().hasOnly(['name', 'phone', 'plate', 'status', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'plate', 'status', 'createdAt', 'identityPath', 'licensePath', 'registrationFrontPath', 'registrationBackPath', 'docsStatus', 'autoCheck', 'plateOcrResult'])
         && request.resource.data.status == 'pending'
         && request.resource.data.name.size() <= 60
-        && request.resource.data.plate.size() <= 20;
-      allow update: if isAdmin();
+        && request.resource.data.plate.size() <= 20
+        && request.resource.data.identityPath == ''
+        && request.resource.data.licensePath == ''
+        && request.resource.data.registrationFrontPath == ''
+        && request.resource.data.registrationBackPath == ''
+        && request.resource.data.docsStatus == 'missing'
+        && request.resource.data.autoCheck == 'not_run'
+        && request.resource.data.plateOcrResult == 'not_run';
+      // Şoför yalnızca kendi belge dosyalarının yolunu ve otomatik ön kontrol durumunu güncelleyebilir.
+      // status, ad, telefon ve plaka yalnızca yönetici tarafından değiştirilebilir.
+      allow update: if isAdmin()
+        || (signedIn() && uid() == id
+            && changed().hasOnly(['identityPath', 'licensePath', 'registrationFrontPath', 'registrationBackPath', 'docsStatus', 'autoCheck', 'plateOcrResult'])
+            && request.resource.data.status == resource.data.status
+            && request.resource.data.name == resource.data.name
+            && request.resource.data.phone == resource.data.phone
+            && request.resource.data.plate == resource.data.plate
+            && request.resource.data.identityPath is string
+            && request.resource.data.licensePath is string
+            && request.resource.data.registrationFrontPath is string
+            && request.resource.data.registrationBackPath is string
+            && request.resource.data.docsStatus in ['incomplete', 'submitted']
+            && request.resource.data.autoCheck in ['incomplete', 'suspicious', 'review_required', 'manual_review']
+            && request.resource.data.plateOcrResult in ['not_run', 'match', 'mismatch', 'unreadable']);
     }
 
     // Yolculuklar
