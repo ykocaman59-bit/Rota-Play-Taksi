@@ -99,6 +99,60 @@ private fun TaxiAuth() {
     }
 }
 
+
+// ---------- Kimlik / ehliyet / ruhsat belgeleri ----------
+@Composable
+private fun DriverDocuments() {
+    val ctx = LocalContext.current.applicationContext
+    val s = TaxiStore
+    var busy by remember { mutableStateOf(false) }
+    var info by remember { mutableStateOf("") }
+
+    fun upload(uri: Uri?, kind: String) {
+        if (uri == null) return
+        busy = true
+        info = "Belge yükleniyor…"
+        s.bg {
+            try {
+                s.uploadDriverDocument(ctx, uri, kind)
+                info = "Belge yüklendi. Diğer belgeleri de tamamlayın."
+            } catch (e: Exception) {
+                info = e.message ?: "Belge yüklenemedi"
+            }
+            busy = false
+        }
+    }
+    val identityPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "identity") }
+    val licensePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "license") }
+    val frontPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "registrationFront") }
+    val backPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "registrationBack") }
+
+    Card {
+        Text("Şoför belge doğrulaması", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text("Hesabınızın açılması için dört belge fotoğrafını yükleyin. Belgeler yalnızca siz ve yetkili yönetici tarafından görüntülenebilir.")
+        Text("Kimlik: ${if (s.docIdentityPath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { identityPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Kimlik fotoğrafı yükle") }
+        Text("Ehliyet: ${if (s.docLicensePath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { licensePicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Ehliyet fotoğrafı yükle") }
+        Text("Ruhsat ön yüz: ${if (s.docRegFrontPath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { frontPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Ruhsat ön yüzünü yükle") }
+        Text("Ruhsat arka yüz: ${if (s.docRegBackPath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { backPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Ruhsat arka yüzünü yükle") }
+        if (info.isNotBlank()) Text(info, color = Color(0xFFFFD166))
+        Text(
+            when (s.autoCheck) {
+                "review_required" -> "Ön kontrol: Plaka OCR eşleşti; yönetici incelemesi bekleniyor."
+                "suspicious" -> "Ön kontrol: Plaka biçimi/eşleşmesi şüpheli. Yönetici inceleyecek."
+                "manual_review" -> "Ön kontrol: OCR plakayı okuyamadı; yönetici inceleyecek."
+                "incomplete" -> "Ön kontrol: Eksik belge var."
+                else -> "Durum: Belgeler bekleniyor."
+            },
+            color = Color.White.copy(alpha = 0.75f)
+        )
+        Text("Not: OCR yalnızca fotoğraftaki yazıyı okur; belge sahteciliğini veya resmî kayıt eşleşmesini kanıtlamaz. Son karar yönetici incelemesidir.", fontSize = 12.sp, color = Color.White.copy(alpha = 0.6f))
+    }
+}
+
 // ---------- Ana taksi ekranı ----------
 private fun hasLocation(c: Context) =
     ContextCompat.checkSelfPermission(c, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -113,7 +167,7 @@ private fun TaxiMain(onHome: () -> Unit) {
 
     fun goOnline() {
         when {
-            s.status != "approved" -> s.message = "Hesabınız henüz onaylanmadı"
+            s.status != "approved" || s.docsStatus != "submitted" -> s.message = "Hesabınız ve belgeleriniz henüz yönetici tarafından onaylanmadı"
             !Settings.canDrawOverlays(ctx) -> {
                 s.message = "Yandex'in üstünde düğme gösterebilmek için izin verin, sonra tekrar basın"
                 open(ctx, Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}")))
@@ -138,6 +192,7 @@ private fun TaxiMain(onHome: () -> Unit) {
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (s.status != "approved" || s.docsStatus != "submitted") DriverDocuments()
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Taksi", fontSize = 26.sp, fontWeight = FontWeight.Bold)
