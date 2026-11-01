@@ -146,6 +146,7 @@ private fun TaxiMain(onHome: () -> Unit) {
                         (s.rating?.let { "  ★ $it" } ?: ""),
                     color = Color.White.copy(alpha = 0.7f)
                 )
+                if (s.status == "approved") Text("Seviye ${s.level} · ${s.radiusKm.toInt()} km çevreden talep alırsınız", color = Cyan)
             }
             if (!s.online && s.current == null)
                 Text("Çıkış", color = Cyan, modifier = Modifier.clickable { s.logout(app) }.padding(12.dp))
@@ -155,9 +156,20 @@ private fun TaxiMain(onHome: () -> Unit) {
         val cur = s.current
         val inc = s.incoming
         when {
+            s.status.isEmpty() -> Card {
+                Text("Şoför kaydınız tamamlanmadı.", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("Hesabınız açıldı ama başvuru kaydı veritabanına yazılamadı. Aşağıdan yeniden deneyin; hata sürerse yukarıdaki mesajı bana iletin.", color = Color.White.copy(alpha = 0.7f))
+                Button(onClick = {
+                    s.bg {
+                        try { s.createProfile(); s.message = ""; s.refreshMe() }
+                        catch (e: Exception) { s.message = "Kayıt yazılamadı: " + (e.message ?: "bağlantı hatası") }
+                    }
+                }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Kaydı yeniden dene") }
+            }
+
             s.status != "approved" -> Card {
                 Text(if (s.status == "blocked") "Hesabınız askıya alındı." else "Başvurunuz onay bekliyor.", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                Text("Onaylandığında çevrimiçi olup talep alabilirsiniz.", color = Color.White.copy(alpha = 0.7f))
+                Text("Yönetici onayladığında çevrimiçi olup talep alabilirsiniz.", color = Color.White.copy(alpha = 0.7f))
                 OutlinedButton(onClick = { s.bg { s.refreshMe() } }) { Text("Durumu yenile") }
             }
 

@@ -45,6 +45,8 @@ object TaxiStore {
     var phase by mutableStateOf("")             // to_pickup | on_trip | finish | rate
     var message by mutableStateOf("")
     var openTaxi by mutableStateOf(false)
+    var level by mutableStateOf(1)               // 1-5: puan ve sefer sayısına göre
+    var radiusKm by mutableStateOf(3.0)          // seviyeye göre talep alma yarıçapı
 
     @Volatile var lat: Double? = null
     @Volatile var lon: Double? = null
@@ -52,9 +54,8 @@ object TaxiStore {
     private val main = Handler(Looper.getMainLooper())
     private val rejected = HashSet<String>()
     private var lastLocPush = 0L
-    private const val RADIUS_NEAR_KM = 3.0   // ilk 30 saniye
-    private const val RADIUS_FAR_KM = 5.0    // sonraki 60 saniye
 
+    private var authUid = ""                 // giriş yapan kullanıcının kimliği (profil yazılana kadar ekrana yansıtılmaz)
     private var idToken = ""
     private var refreshToken = ""
     private var tokenExp = 0L
@@ -93,8 +94,8 @@ object TaxiStore {
             raw.startsWith("WEAK_PASSWORD") -> "Şifre en az 6 karakter olmalı"
             raw.startsWith("OPERATION_NOT_ALLOWED") -> "Firebase'de E-posta/Şifre girişi açık değil"
             raw.startsWith("TOO_MANY_ATTEMPTS") -> "Çok fazla deneme, biraz bekleyin"
-            code == 403 -> "İzin yok (Firestore kuralları yayında mı?)"
-            else -> if (raw.isNotEmpty()) raw else "Hata ($code)"
+            code == 403 -> "İzin yok (403)" + (if (raw.isNotEmpty()) ": $raw" else "")
+            else -> if (raw.isNotEmpty()) "$raw ($code)" else "Hata ($code)"
         }
     }
 
@@ -124,7 +125,7 @@ object TaxiStore {
     private fun authCall(endpoint: String, phone: String, pass: String) {
         val body = JSONObject().put("email", emailOf(phone)).put("password", pass).put("returnSecureToken", true)
         val j = JSONObject(httpText("POST", "https://identitytoolkit.googleapis.com/v1/accounts:$endpoint?key=$FB_API_KEY", body.toString(), null))
-        driverId = j.getString("localId")
+        authUid = j.getString("localId")
         idToken = j.getString("idToken")
         refreshToken = j.getString("refreshToken")
         tokenExp = System.currentTimeMillis() + (j.getString("expiresIn").toLong() - 60) * 1000
@@ -142,18 +143,36 @@ object TaxiStore {
         return idToken
     }
 
+    /** Şoför profil belgesini (onay bekliyor olarak) yazar. Kayıtta ve "Kaydı yeniden dene" düğmesinde kullanılır. */
+    fun createProfile() {
+        val uid = driverId.ifEmpty { authUid }
+        fsWrite("drivers/$uid", mapOf(
+            "name" to name, "phone" to phone, "plate" to plate,
+            "status" to "pending", "createdAt" to System.currentTimeMillis()))
+    }
+
     fun register(c: Context, n: String, ph: String, pl: String, pass: String) {
         if (n.isBlank() || pl.isBlank() || ph.filter { it.isDigit() }.length < 10) throw ApiError(400, "Ad, plaka ve geçerli bir telefon girin")
         authCall("signUp", ph, pass)
         name = n; plate = pl.uppercase(); phone = ph
-        fsWrite("drivers/$driverId", mapOf("name" to name, "phone" to ph, "plate" to plate, "status" to "pending", "createdAt" to System.currentTimeMillis()))
+        var ok = true
+        try {
+            createProfile()                      // önce şoför belgesi yazılır...
+        } catch (e: Exception) {
+            ok = false
+            message = "Hesap açıldı ama şoför kaydı yazılamadı: " + (if (e is ApiError) e.message else "bağlantı hatası")
+        }
+        driverId = authUid                       // ...sonra ekran taksi sayfasına geçer
         saveSession(c)
+        if (!ok) return
+        message = ""
         track("kayit_oldu", plate)
         refreshMe()
     }
 
     fun login(c: Context, ph: String, pass: String) {
         authCall("signInWithPassword", ph, pass)
+        driverId = authUid
         phone = ph
         saveSession(c)
         refreshMe(c)
@@ -205,16 +224,27 @@ object TaxiStore {
         docJson(JSONObject(httpText("GET", "$FS/$path", null, token())))
     } catch (e: ApiError) { if (e.code == 404) null else throw e }
 
-    /** Verilen alanları yazar (belge yoksa oluşturur). updateTime verilirse, belge o andan beri değiştiyse yazma reddedilir. */
-    private fun fsWrite(path: String, fields: Map<String, Any?>, updateTime: String? = null) {
+    private fun writeObj(path: String, fields: Map<String, Any?>, updateTime: String? = null, mustNotExist: Boolean = false): JSONObject {
         val upd = JSONObject()
             .put("name", "projects/$FB_PROJECT_ID/databases/(default)/documents/$path")
             .put("fields", encFields(fields))
         val w = JSONObject().put("update", upd)
             .put("updateMask", JSONObject().put("fieldPaths", JSONArray(fields.keys.toList())))
-        if (updateTime != null && updateTime.isNotEmpty()) w.put("currentDocument", JSONObject().put("updateTime", updateTime))
-        httpText("POST", "$FS:commit", JSONObject().put("writes", JSONArray().put(w)).toString(), token())
+        if (mustNotExist) w.put("currentDocument", JSONObject().put("exists", false))
+        else if (!updateTime.isNullOrEmpty()) w.put("currentDocument", JSONObject().put("updateTime", updateTime))
+        return w
     }
+
+    /** Birden fazla yazmayı tek işlemde yapar (hepsi olur ya da hiçbiri). */
+    private fun fsCommit(writes: List<JSONObject>) {
+        val arr = JSONArray()
+        for (w in writes) arr.put(w)
+        httpText("POST", "$FS:commit", JSONObject().put("writes", arr).toString(), token())
+    }
+
+    /** Verilen alanları yazar (belge yoksa oluşturur). updateTime verilirse, belge o andan beri değiştiyse yazma reddedilir. */
+    private fun fsWrite(path: String, fields: Map<String, Any?>, updateTime: String? = null) =
+        fsCommit(listOf(writeObj(path, fields, updateTime)))
 
     private fun fsQuery(coll: String, eq: List<Pair<String, String>>, limit: Int = 20): List<JSONObject> {
         val filters = JSONArray()
@@ -250,17 +280,33 @@ object TaxiStore {
 
     private fun fail(e: Exception) { message = if (e is ApiError) (e.message ?: "Hata") else "Bağlanılamadı, internetinizi kontrol edin" }
 
+    /** Seviye eşikleri firestore.rules içindeki levelRadius ile aynı olmalıdır. */
+    private fun applyLevel(count: Long, avg: Double) {
+        val (lv, r) = when {
+            count >= 100 && avg >= 4.8 -> 5 to 15.0
+            count >= 60 && avg >= 4.6 -> 4 to 12.0
+            count >= 30 && avg >= 4.3 -> 3 to 8.0
+            count >= 10 && avg >= 4.0 -> 2 to 5.0
+            else -> 1 to 3.0
+        }
+        level = lv; radiusKm = r
+    }
+
     // ---------- Profil ----------
     fun refreshMe(c: Context? = null) {
         try {
             val d = fsGet("drivers/$driverId")
             if (d == null) { status = ""; message = "Şoför kaydı bulunamadı"; return }
             name = d.optString("name"); plate = d.optString("plate"); phone = d.optString("phone"); status = d.optString("status")
+            if (message.startsWith("Şoför kaydı bulunamadı")) message = ""
             if (c != null) saveSession(c)
             if (status != "approved") return
-            val done = fsQuery("rides", listOf("driverUid" to driverId, "status" to "completed"), 100)
-            val stars = done.map { it.optLong("driverRating", 0L) }.filter { it > 0 }
-            rating = if (stars.isEmpty()) null else Math.round(stars.average() * 10) / 10.0
+            val st = fsGet("driverStats/$driverId")
+            if (st != null) {
+                val avg = st.optDouble("avg", 0.0)
+                rating = Math.round(avg * 10) / 10.0
+                applyLevel(st.optLong("count", 0L), avg)
+            } else { rating = null; applyLevel(0L, 0.0) }
             if (current == null) {
                 var act = fsQuery("rides", listOf("driverUid" to driverId, "status" to "accepted"), 1).firstOrNull()
                 var ph = "to_pickup"
@@ -285,7 +331,7 @@ object TaxiStore {
         val la = lat; val lo = lon
         if (la == null || lo == null) { message = "Konum bekleniyor (GPS)…"; return null }
         if (message.startsWith("Konum bekleniyor")) message = ""
-        // Mesafe kuralı: önce 3 km, talep 30 sn açık kalırsa 5 km. Daha uzaktaki şoför talebi hiç görmez.
+        // Mesafe kuralı: şoförün seviyesine göre 3-15 km. Yarıçapın dışındaki şoför talebi hiç görmez.
         fun distOf(r: JSONObject): Double {
             val p = r.getJSONObject("pickup")
             return km(la, lo, p.getDouble("lat"), p.getDouble("lon"))
@@ -297,7 +343,7 @@ object TaxiStore {
             if (declined != null) for (i in 0 until declined.length()) if (declined.optString(i) == driverId) mine = true
             val age = now - r.optLong("createdAt", 0L)
             val d = distOf(r)
-            !mine && !rejected.contains(r.optString("_id")) && age < 90000 && (d <= RADIUS_NEAR_KM || (age >= 30000 && d <= RADIUS_FAR_KM))
+            !mine && !rejected.contains(r.optString("_id")) && age < 90000 && d <= radiusKm
         }
         val inc = incoming
         if (inc != null && found.none { it.optString("_id") == inc.id }) incoming = null
@@ -392,16 +438,37 @@ object TaxiStore {
         }
     }
 
+    /** Puan hem yolculuğa hem yolcunun genel puan özetine (passengerStats) tek işlemde yazılır. */
+    private fun writePassengerRating(rideId: String, stars: Int) {
+        val ride = fsGet("rides/$rideId") ?: throw ApiError(404, "Yolculuk bulunamadı")
+        val pUid = ride.optString("passengerUid")
+        val old = fsGet("passengerStats/$pUid")
+        val sum = (old?.optLong("sum", 0L) ?: 0L) + stars
+        val count = (old?.optLong("count", 0L) ?: 0L) + 1
+        val stat = mapOf("sum" to sum, "count" to count, "avg" to sum.toDouble() / count,
+            "lastRide" to rideId, "name" to ride.optString("passengerName", "Yolcu"))
+        fsCommit(listOf(
+            writeObj("rides/$rideId", mapOf("passengerRating" to stars), ride.optString("_ut")),
+            writeObj("passengerStats/$pUid", stat, old?.optString("_ut"), old == null)
+        ))
+    }
+
     fun ratePassenger(stars: Int, done: () -> Unit) {
         val r = current
         bg {
+            var failed = ""
             try {
                 if (r != null && stars > 0) {
-                    fsWrite("rides/${r.id}", mapOf("passengerRating" to stars))
+                    var attempt = 0
+                    while (true) {                       // aynı anda başka puan geldiyse yeniden dener
+                        try { writePassengerRating(r.id, stars); break }
+                        catch (e: ApiError) { attempt++; if (attempt >= 3) throw e }
+                    }
                     track("yolcuyu_puanladi", "$stars yıldız")
                 }
-            } catch (e: Exception) { }
-            current = null; message = "Yolculuk tamamlandı"; changePhase("")
+            } catch (e: Exception) { failed = "Puan kaydedilemedi: " + (e.message ?: "bağlantı hatası") }
+            current = null; message = if (failed.isEmpty()) "Yolculuk tamamlandı" else failed
+            changePhase("")
             refreshMe()
             main.post(done)
         }
