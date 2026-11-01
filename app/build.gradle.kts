@@ -34,6 +34,4 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("com.google.mlkit:text-recognition:16.0.1")
-    implementation("com.google.android.gms:play-services-tasks:18.2.0")
 }
