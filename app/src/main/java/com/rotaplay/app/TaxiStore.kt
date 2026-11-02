@@ -36,6 +36,7 @@ object TaxiStore {
     var driverId by mutableStateOf("")          // Firebase kullanıcı kimliği (uid)
     var name by mutableStateOf("")
     var plate by mutableStateOf("")
+    var driverType by mutableStateOf("taxi")
     var phone by mutableStateOf("")
     var status by mutableStateOf("")            // pending | approved | blocked
     var rating by mutableStateOf<Double?>(null)
@@ -72,14 +73,15 @@ object TaxiStore {
         name = p.getString("name", "") ?: ""
         plate = p.getString("plate", "") ?: ""
         phone = p.getString("phone", "") ?: ""
+        driverType = p.getString("driverType", "taxi") ?: "taxi"
         tokenExp = 0L
     }
     private fun saveSession(c: Context) {
         prefs(c).edit().putString("uid", driverId).putString("refresh", refreshToken)
-            .putString("name", name).putString("plate", plate).putString("phone", phone).apply()
+            .putString("name", name).putString("plate", plate).putString("phone", phone).putString("driverType", driverType).apply()
     }
     fun logout(c: Context) {
-        driverId = ""; idToken = ""; refreshToken = ""; name = ""; plate = ""; phone = ""
+        driverId = ""; idToken = ""; refreshToken = ""; name = ""; plate = ""; phone = ""; driverType = "taxi"
         status = ""; rating = null; online = false; incoming = null; current = null
         rejected.clear(); changePhase("")
         prefs(c).edit().clear().apply()
@@ -147,11 +149,12 @@ object TaxiStore {
     fun createProfile() {
         val uid = driverId.ifEmpty { authUid }
         fsWrite("drivers/$uid", mapOf(
-            "name" to name, "phone" to phone, "plate" to plate,
+            "name" to name, "phone" to phone, "plate" to plate, "driverType" to driverType,
             "status" to "pending", "createdAt" to System.currentTimeMillis()))
     }
 
-    fun register(c: Context, n: String, ph: String, pl: String, pass: String) {
+    fun register(c: Context, n: String, ph: String, pl: String, dtype: String, pass: String) {
+        driverType = dtype;
         if (n.isBlank() || pl.isBlank() || ph.filter { it.isDigit() }.length < 10) throw ApiError(400, "Ad, plaka ve geçerli bir telefon girin")
         authCall("signUp", ph, pass)
         name = n; plate = pl.uppercase(); phone = ph
@@ -297,7 +300,7 @@ object TaxiStore {
         try {
             val d = fsGet("drivers/$driverId")
             if (d == null) { status = ""; message = "Şoför kaydı bulunamadı"; return }
-            name = d.optString("name"); plate = d.optString("plate"); phone = d.optString("phone"); status = d.optString("status")
+            name = d.optString("name"); plate = d.optString("plate"); phone = d.optString("phone"); status = d.optString("status"); driverType = d.optString("driverType", "taxi")
             if (message.startsWith("Şoför kaydı bulunamadı")) message = ""
             if (c != null) saveSession(c)
             if (status != "approved") return
