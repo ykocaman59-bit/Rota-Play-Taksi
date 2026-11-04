@@ -8,11 +8,7 @@ service firebase.storage {
     }
     match /driver-documents/{driverId}/{fileName} {
       allow read: if signedIn() && (request.auth.uid == driverId || isAdmin());
-      allow write: if signedIn()
-        && request.auth.uid == driverId
-        && fileName in ['identity', 'license', 'registrationFront', 'registrationBack']
-        && request.resource.size < 12 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+      allow write: if false;   // belge yükleme kapatıldı; eski belgeler yalnızca okunabilir
     }
   }
 }
