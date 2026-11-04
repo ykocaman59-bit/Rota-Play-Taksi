@@ -3,11 +3,6 @@ package com.rotaplay.app
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import java.util.concurrent.TimeUnit
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -58,13 +53,6 @@ object TaxiStore {
     var plate by mutableStateOf("")
     var legalConsent by mutableStateOf(false)   // yasal sorumluluk onayı (kayıtta zorunlu)
     var phone by mutableStateOf("")
-    var docIdentityPath by mutableStateOf("")
-    var docLicensePath by mutableStateOf("")
-    var docRegFrontPath by mutableStateOf("")
-    var docRegBackPath by mutableStateOf("")
-    var docsStatus by mutableStateOf("missing")
-    var autoCheck by mutableStateOf("not_run")
-    var plateOcrResult by mutableStateOf("not_run")
     var status by mutableStateOf("")            // pending | approved | blocked
     var rating by mutableStateOf<Double?>(null)
     var online by mutableStateOf(false)
@@ -124,8 +112,6 @@ object TaxiStore {
     fun logout(c: Context) {
         driverId = ""; idToken = ""; refreshToken = ""; name = ""; plate = ""; phone = ""
         email = ""; iban = ""; verified = false; legalConsent = false
-        docIdentityPath = ""; docLicensePath = ""; docRegFrontPath = ""; docRegBackPath = ""
-        docsStatus = "missing"; autoCheck = "not_run"; plateOcrResult = "not_run"
         status = ""; rating = null; online = false; incoming = null; current = null
         rejected.clear(); changePhase("")
         prefs(c).edit().clear().apply()
@@ -196,9 +182,7 @@ object TaxiStore {
             "name" to name, "phone" to phone, "plate" to plate,
             "email" to email, "iban" to iban, "vehicleType" to "yellow_taxi",
             "status" to "pending", "createdAt" to System.currentTimeMillis(),
-            "legalConsent" to legalConsent, "legalConsentAt" to System.currentTimeMillis(), "legalConsentVersion" to LegalConsent.VERSION,
-            "identityPath" to "", "licensePath" to "", "registrationFrontPath" to "",
-            "registrationBackPath" to "", "docsStatus" to "missing", "autoCheck" to "not_run", "plateOcrResult" to "not_run"))
+            "legalConsent" to legalConsent, "legalConsentAt" to System.currentTimeMillis(), "legalConsentVersion" to LegalConsent.VERSION))
     }
 
     fun register(c: Context, n: String, ph: String, em: String, pl: String, ib: String, pass: String, consent: Boolean) {
@@ -215,7 +199,7 @@ object TaxiStore {
         name = n; plate = plateN; phone = ph; email = mail; iban = ibanN; verified = false
         var ok = true
         try {
-            createProfile()                      // önce şoför belgesi yazılır...
+            createProfile()                      // önce şoför kaydı yazılır...
         } catch (e: Exception) {
             ok = false
             message = "Hesap açıldı ama şoför kaydı yazılamadı: " + (if (e is ApiError) e.message else "bağlantı hatası")
@@ -262,98 +246,7 @@ object TaxiStore {
         saveSession(c)
     }
 
-    /**
-     * Belgeyi Firebase Storage'a özel (private) yükler; dosya yolu Firestore profilinde tutulur.
-     * docType: identity | license | registrationFront | registrationBack
-     */
-    fun uploadDriverDocument(c: Context, uri: Uri, docType: String) {
-        val allowed = setOf("identity", "license", "registrationFront", "registrationBack")
-        if (docType !in allowed) throw ApiError(400, "Geçersiz belge türü")
-        val uid = driverId.ifEmpty { authUid }
-        if (uid.isBlank()) throw ApiError(401, "Önce giriş yapın")
-        var thisOcr = "not_applicable"
-        if (docType == "registrationFront" || docType == "registrationBack") {
-            try {
-                val image = InputImage.fromFilePath(c, uri)
-                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-                val recognized = try { Tasks.await(recognizer.process(image), 25, TimeUnit.SECONDS).text } finally { recognizer.close() }
-                val compactText = recognized.uppercase().replace(Regex("[^0-9A-Z]"), "")
-                val expected = plate.uppercase().replace(Regex("[^0-9A-Z]"), "")
-                val candidates = Regex("[0-9]{2}[A-Z]{1,3}[0-9]{2,4}").findAll(compactText).map { it.value }.toList()
-                thisOcr = when {
-                    expected.isNotBlank() && compactText.contains(expected) -> "match"
-                    candidates.isNotEmpty() -> "mismatch"
-                    else -> "unreadable"
-                }
-            } catch (_: Exception) { thisOcr = "unreadable" }
-        }
-        val bytes = c.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw ApiError(400, "Dosya okunamadı")
-        if (bytes.isEmpty() || bytes.size > 12 * 1024 * 1024) throw ApiError(400, "Dosya boş veya 12 MB sınırını aşıyor")
-        val mime = c.contentResolver.getType(uri) ?: "image/jpeg"
-        if (!mime.startsWith("image/")) throw ApiError(400, "Yalnızca fotoğraf yükleyebilirsiniz")
-        val objectPath = "driver-documents/$uid/$docType"
-        val bucket = "rotaplay-taksi.firebasestorage.app"
-        val encodedPath = URLEncoder.encode(objectPath, "UTF-8").replace("+", "%20")
-        val conn = URL("https://firebasestorage.googleapis.com/v0/b/$bucket/o?uploadType=media&name=$encodedPath").openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 20000
-            conn.readTimeout = 30000
-            conn.doOutput = true
-            conn.setRequestProperty("Authorization", "Bearer ${token()}")
-            conn.setRequestProperty("Content-Type", mime)
-            conn.outputStream.use { it.write(bytes) }
-            val code = conn.responseCode
-            val response = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
-            if (code !in 200..299) throw ApiError(code, "Belge yüklenemedi: $response")
-        } finally { conn.disconnect() }
-
-        val field = when (docType) {
-            "identity" -> "identityPath"
-            "license" -> "licensePath"
-            "registrationFront" -> "registrationFrontPath"
-            else -> "registrationBackPath"
-        }
-        val values = mutableMapOf<String, Any?>(field to objectPath)
-        val paths = mapOf(
-            "identityPath" to if (docType == "identity") objectPath else docIdentityPath,
-            "licensePath" to if (docType == "license") objectPath else docLicensePath,
-            "registrationFrontPath" to if (docType == "registrationFront") objectPath else docRegFrontPath,
-            "registrationBackPath" to if (docType == "registrationBack") objectPath else docRegBackPath
-        )
-        val complete = paths.values.all { it.isNotBlank() }
-        val normalizedPlate = plate.uppercase().replace(" ", "")
-        val plateFormatOk = TaxiPlate.isValid(normalizedPlate)
-        val previousOcr = plateOcrResult
-        val combinedOcr = when {
-            thisOcr == "match" || previousOcr == "match" -> "match"
-            thisOcr == "mismatch" && previousOcr == "mismatch" -> "mismatch"
-            thisOcr == "unreadable" || previousOcr == "unreadable" -> "unreadable"
-            else -> previousOcr
-        }
-        if (docType == "registrationFront" || docType == "registrationBack") values["plateOcrResult"] = combinedOcr
-        val check = when {
-            !complete -> "incomplete"
-            !plateFormatOk || combinedOcr == "mismatch" -> "suspicious"
-            combinedOcr == "match" -> "review_required"
-            else -> "manual_review"
-        }
-        values["docsStatus"] = if (complete) "submitted" else "incomplete"
-        values["autoCheck"] = check
-        fsWrite("drivers/$uid", values)
-        when (docType) {
-            "identity" -> docIdentityPath = objectPath
-            "license" -> docLicensePath = objectPath
-            "registrationFront" -> docRegFrontPath = objectPath
-            "registrationBack" -> docRegBackPath = objectPath
-        }
-        docsStatus = values["docsStatus"].toString()
-        autoCheck = check
-        plateOcrResult = combinedOcr
-    }
-
-    fun login(c: Context, em: String, pass: String) {
+        fun login(c: Context, em: String, pass: String) {
         val mail = em.trim().lowercase()
         authCall("signInWithPassword", mail, pass)
         driverId = authUid
@@ -483,13 +376,6 @@ object TaxiStore {
             if (d == null) { status = ""; message = "Şoför kaydı bulunamadı"; return }
             name = d.optString("name"); plate = d.optString("plate"); phone = d.optString("phone"); status = d.optString("status")
             iban = d.optString("iban")
-            docIdentityPath = d.optString("identityPath")
-            docLicensePath = d.optString("licensePath")
-            docRegFrontPath = d.optString("registrationFrontPath")
-            docRegBackPath = d.optString("registrationBackPath")
-            docsStatus = d.optString("docsStatus", "missing")
-            autoCheck = d.optString("autoCheck", "not_run")
-            plateOcrResult = d.optString("plateOcrResult", "not_run")
             if (message.startsWith("Şoför kaydı bulunamadı")) message = ""
             if (c != null) saveSession(c)
             if (status != "approved") return
