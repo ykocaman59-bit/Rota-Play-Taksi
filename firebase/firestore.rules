@@ -43,13 +43,16 @@ service cloud.firestore {
     match /drivers/{id} {
       allow read: if isAdmin() || (signedIn() && uid() == id);
       allow create: if signedIn() && uid() == id
-        && request.resource.data.keys().hasOnly(['name', 'phone', 'plate', 'email', 'iban', 'vehicleType', 'status', 'createdAt', 'identityPath', 'licensePath', 'registrationFrontPath', 'registrationBackPath', 'docsStatus', 'autoCheck', 'plateOcrResult'])
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'plate', 'email', 'iban', 'vehicleType', 'status', 'createdAt', 'identityPath', 'licensePath', 'registrationFrontPath', 'registrationBackPath', 'docsStatus', 'autoCheck', 'plateOcrResult', 'legalConsent', 'legalConsentAt', 'legalConsentVersion'])
         && request.resource.data.status == 'pending'
         && request.resource.data.vehicleType == 'yellow_taxi'
         && request.resource.data.email == request.auth.token.email
         && okIban(request.resource.data.iban)
         && request.resource.data.name.size() <= 60
         && request.resource.data.plate.size() <= 20
+        && request.resource.data.plate.matches('^(0[1-9]|[1-7][0-9]|8[01]) T[A-PR-VYZ]{0,2} [0-9]{2,4}$')   // 81 il ticari taksi plakası
+        && request.resource.data.legalConsent == true          // yasal sorumluluk onayı zorunlu
+        && request.resource.data.legalConsentVersion is string
         && request.resource.data.identityPath == ''
         && request.resource.data.licensePath == ''
         && request.resource.data.registrationFrontPath == ''
