@@ -56,6 +56,18 @@ service cloud.firestore {
             && okIban(request.resource.data.iban));
     }
 
+    // Yolcular: yolcu uygulaması kayıt sonrası profilini (ad, soyad, telefon) buraya yazar
+    match /passengers/{id} {
+      allow read: if isAdmin() || (signedIn() && uid() == id);
+      allow create: if signedIn() && uid() == id
+        && request.resource.data.keys().hasOnly(['firstName', 'lastName', 'phone', 'email', 'createdAt'])
+        && request.resource.data.firstName is string && request.resource.data.firstName.size() <= 60
+        && request.resource.data.lastName is string && request.resource.data.lastName.size() <= 60
+        && request.resource.data.phone is string && request.resource.data.phone.size() <= 40
+        && request.resource.data.email is string && request.resource.data.email.size() <= 100;
+      allow update: if isAdmin();
+    }
+
     // Yolculuklar
     match /rides/{rid} {
       allow read: if isAdmin()
