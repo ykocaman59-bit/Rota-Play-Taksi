@@ -56,6 +56,7 @@ object TaxiStore {
     var driverId by mutableStateOf("")          // Firebase kullanıcı kimliği (uid)
     var name by mutableStateOf("")
     var plate by mutableStateOf("")
+    var legalConsent by mutableStateOf(false)   // yasal sorumluluk onayı (kayıtta zorunlu)
     var phone by mutableStateOf("")
     var docIdentityPath by mutableStateOf("")
     var docLicensePath by mutableStateOf("")
@@ -103,6 +104,7 @@ object TaxiStore {
         refreshToken = p.getString("refresh", "") ?: ""
         name = p.getString("name", "") ?: ""
         plate = p.getString("plate", "") ?: ""
+        legalConsent = p.getBoolean("legalConsent", false)
         phone = p.getString("phone", "") ?: ""
         email = p.getString("email", "") ?: ""
         iban = p.getString("iban", "") ?: ""
@@ -116,11 +118,12 @@ object TaxiStore {
     private fun saveSession(c: Context) {
         prefs(c).edit().putString("uid", driverId).putString("refresh", refreshToken)
             .putString("name", name).putString("plate", plate).putString("phone", phone)
-            .putString("email", email).putString("iban", iban).putBoolean("verified", verified).apply()
+            .putString("email", email).putString("iban", iban).putBoolean("verified", verified)
+            .putBoolean("legalConsent", legalConsent).apply()
     }
     fun logout(c: Context) {
         driverId = ""; idToken = ""; refreshToken = ""; name = ""; plate = ""; phone = ""
-        email = ""; iban = ""; verified = false
+        email = ""; iban = ""; verified = false; legalConsent = false
         docIdentityPath = ""; docLicensePath = ""; docRegFrontPath = ""; docRegBackPath = ""
         docsStatus = "missing"; autoCheck = "not_run"; plateOcrResult = "not_run"
         status = ""; rating = null; online = false; incoming = null; current = null
@@ -193,18 +196,23 @@ object TaxiStore {
             "name" to name, "phone" to phone, "plate" to plate,
             "email" to email, "iban" to iban, "vehicleType" to "yellow_taxi",
             "status" to "pending", "createdAt" to System.currentTimeMillis(),
+            "legalConsent" to legalConsent, "legalConsentAt" to System.currentTimeMillis(), "legalConsentVersion" to LegalConsent.VERSION,
             "identityPath" to "", "licensePath" to "", "registrationFrontPath" to "",
             "registrationBackPath" to "", "docsStatus" to "missing", "autoCheck" to "not_run", "plateOcrResult" to "not_run"))
     }
 
-    fun register(c: Context, n: String, ph: String, em: String, pl: String, ib: String, pass: String) {
+    fun register(c: Context, n: String, ph: String, em: String, pl: String, ib: String, pass: String, consent: Boolean) {
         val mail = em.trim().lowercase()
         val ibanN = normalizeIban(ib)
         if (n.isBlank() || pl.isBlank() || ph.filter { it.isDigit() }.length < 10) throw ApiError(400, "Ad soyad, plaka ve geçerli bir telefon girin")
         if (!Regex("^[a-z0-9._%+-]+@gmail\\.com$").matches(mail)) throw ApiError(400, "Geçerli bir Gmail adresi girin")
         if (!ibanValid(ibanN)) throw ApiError(400, "IBAN geçersiz. TR ile başlayan 26 karakterlik IBAN girin")
+        val plateN = TaxiPlate.format(pl)
+            ?: throw ApiError(400, TaxiPlate.errorFor(pl) ?: "Geçersiz plaka. Yalnızca ticari taksi plakası (örn. 34 T 1234) girilebilir")
+        if (!consent) throw ApiError(400, "Kayıt için yasal sorumluluk sözleşmesini onaylamanız gerekir")
         authCall("signUp", mail, pass)
-        name = n; plate = pl.uppercase(); phone = ph; email = mail; iban = ibanN; verified = false
+        legalConsent = true
+        name = n; plate = plateN; phone = ph; email = mail; iban = ibanN; verified = false
         var ok = true
         try {
             createProfile()                      // önce şoför belgesi yazılır...
@@ -316,7 +324,7 @@ object TaxiStore {
         )
         val complete = paths.values.all { it.isNotBlank() }
         val normalizedPlate = plate.uppercase().replace(" ", "")
-        val plateFormatOk = Regex("^[0-9]{2}[A-Z]{1,3}[0-9]{2,4}$").matches(normalizedPlate)
+        val plateFormatOk = TaxiPlate.isValid(normalizedPlate)
         val previousOcr = plateOcrResult
         val combinedOcr = when {
             thisOcr == "match" || previousOcr == "match" -> "match"

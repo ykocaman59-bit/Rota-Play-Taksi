@@ -78,6 +78,7 @@ private fun TaxiAuth() {
     var iban by rememberSaveable { mutableStateOf("TR") }
     var pass by rememberSaveable { mutableStateOf("") }
     var yellow by rememberSaveable { mutableStateOf(false) }
+    var legal by rememberSaveable { mutableStateOf(false) }
     var err by remember { mutableStateOf("") }
     var ok by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -87,7 +88,8 @@ private fun TaxiAuth() {
         if (mode == "register") {
             Text("Bu uygulama yalnızca sarı (ticari) taksiler içindir. Kayıttan sonra Gmail adresinizi doğrulamanız ve hesabınızın onaylanması gerekir.", color = Color.White.copy(alpha = 0.7f))
             Field("Ad soyad", name) { name = it }
-            Field("Plaka", plate) { plate = it }
+            Field("Plaka (örn. 34 T 1234)", plate) { plate = it }
+            TaxiPlate.errorFor(plate)?.let { Text(it, color = Color(0xFFFF6B5E), fontSize = 12.sp) }
             Field("Telefon", phone, KeyboardType.Phone) { phone = it }
         }
         Field("Gmail adresi", email, KeyboardType.Email) { email = it }
@@ -98,16 +100,22 @@ private fun TaxiAuth() {
                 Checkbox(checked = yellow, onCheckedChange = { yellow = it })
                 Text("Sarı (ticari) taksi şoförüyüm; plaka ve belgelerim bunu doğrular.", modifier = Modifier.weight(1f))
             }
+            Row(verticalAlignment = Alignment.Top, modifier = Modifier.clickable { legal = !legal }) {
+                Checkbox(checked = legal, onCheckedChange = { legal = it })
+                Text(LegalConsent.TEXT, fontSize = 13.sp, modifier = Modifier.weight(1f).padding(top = 12.dp))
+            }
         }
         if (err.isNotEmpty()) Text(err, color = Color(0xFFFF6B5E))
         if (ok.isNotEmpty()) Text(ok, color = Color(0xFF46C37B))
-        Button(enabled = !busy, modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
+        Button(enabled = !busy && (mode != "register" || legal), modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
             if (mode == "register" && !yellow) { err = "Devam etmek için sarı taksi şoförü olduğunuzu onaylayın"; return@Button }
+            if (mode == "register" && !legal) { err = "Kayıt için yasal sorumluluk sözleşmesini onaylayın"; return@Button }
+            if (mode == "register" && !TaxiPlate.isValid(plate)) { err = TaxiPlate.errorFor(plate) ?: "Geçerli bir ticari taksi plakası girin (örn. 34 T 1234)"; return@Button }
             busy = true; err = ""; ok = ""
             TaxiStore.bg {
                 try {
                     when (mode) {
-                        "register" -> TaxiStore.register(ctx, name.trim(), phone.trim(), email.trim(), plate.trim(), iban, pass)
+                        "register" -> TaxiStore.register(ctx, name.trim(), phone.trim(), email.trim(), plate.trim(), iban, pass, legal)
                         "login" -> TaxiStore.login(ctx, email.trim(), pass)
                         else -> { TaxiStore.resetPassword(email); ok = "Bu adres kayıtlıysa şifre yenileme bağlantısı gönderildi. Spam klasörüne de bakın." }
                     }
