@@ -3,6 +3,11 @@ package com.rotaplay.app
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.util.concurrent.TimeUnit
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -28,6 +33,21 @@ data class TaxiRide(
 
 class ApiError(val code: Int, msg: String) : Exception(msg)
 
+/** IBAN'dan boşlukları atar, büyük harfe çevirir. */
+fun normalizeIban(s: String): String = s.uppercase().filter { !it.isWhitespace() }
+
+/** TR + 24 rakam ve mod-97 sağlama toplamı. */
+fun ibanValid(s: String): Boolean {
+    if (!Regex("^TR[0-9]{24}$").matches(s)) return false
+    val r = s.substring(4) + s.substring(0, 4)
+    var rem = 0
+    for (ch in r) {
+        val v = if (ch.isDigit()) ch - '0' else ch - 'A' + 10
+        rem = if (v < 10) (rem * 10 + v) % 97 else (rem * 100 + v) % 97
+    }
+    return rem == 1
+}
+
 /**
  * Şoför oturumu ve taksi modunun ortak durumu. Veriler Firebase (Firestore + Auth) üzerinde tutulur;
  * Google Play hizmeti gerekmesin diye Firebase'in REST arayüzü kullanılır.
@@ -37,6 +57,13 @@ object TaxiStore {
     var name by mutableStateOf("")
     var plate by mutableStateOf("")
     var phone by mutableStateOf("")
+    var docIdentityPath by mutableStateOf("")
+    var docLicensePath by mutableStateOf("")
+    var docRegFrontPath by mutableStateOf("")
+    var docRegBackPath by mutableStateOf("")
+    var docsStatus by mutableStateOf("missing")
+    var autoCheck by mutableStateOf("not_run")
+    var plateOcrResult by mutableStateOf("not_run")
     var status by mutableStateOf("")            // pending | approved | blocked
     var rating by mutableStateOf<Double?>(null)
     var online by mutableStateOf(false)
@@ -44,7 +71,12 @@ object TaxiStore {
     var current by mutableStateOf<TaxiRide?>(null)
     var phase by mutableStateOf("")             // to_pickup | on_trip | finish | rate
     var message by mutableStateOf("")
+    var email by mutableStateOf("")
+    var iban by mutableStateOf("")
+    var verified by mutableStateOf(false)         // Gmail doğrulandı mı
     var openTaxi by mutableStateOf(false)
+
+
     var level by mutableStateOf(1)               // 1-5: puan ve sefer sayısına göre
     var radiusKm by mutableStateOf(3.0)          // seviyeye göre talep alma yarıçapı
 
@@ -72,14 +104,25 @@ object TaxiStore {
         name = p.getString("name", "") ?: ""
         plate = p.getString("plate", "") ?: ""
         phone = p.getString("phone", "") ?: ""
+        email = p.getString("email", "") ?: ""
+        iban = p.getString("iban", "") ?: ""
+        verified = p.getBoolean("verified", false)
         tokenExp = 0L
+        if (driverId.isNotEmpty() && email.isEmpty()) {      // eski (telefonla açılmış) oturum: Gmail ile yeniden kayıt gerekir
+            p.edit().clear().apply()
+            driverId = ""; refreshToken = ""; name = ""; plate = ""; phone = ""; verified = false
+        }
     }
     private fun saveSession(c: Context) {
         prefs(c).edit().putString("uid", driverId).putString("refresh", refreshToken)
-            .putString("name", name).putString("plate", plate).putString("phone", phone).apply()
+            .putString("name", name).putString("plate", plate).putString("phone", phone)
+            .putString("email", email).putString("iban", iban).putBoolean("verified", verified).apply()
     }
     fun logout(c: Context) {
         driverId = ""; idToken = ""; refreshToken = ""; name = ""; plate = ""; phone = ""
+        email = ""; iban = ""; verified = false
+        docIdentityPath = ""; docLicensePath = ""; docRegFrontPath = ""; docRegBackPath = ""
+        docsStatus = "missing"; autoCheck = "not_run"; plateOcrResult = "not_run"
         status = ""; rating = null; online = false; incoming = null; current = null
         rejected.clear(); changePhase("")
         prefs(c).edit().clear().apply()
@@ -89,8 +132,9 @@ object TaxiStore {
     private fun friendly(text: String, code: Int): String {
         val raw = try { JSONObject(text).optJSONObject("error")?.optString("message") ?: "" } catch (e: Exception) { "" }
         return when {
-            raw.startsWith("EMAIL_EXISTS") -> "Bu telefon zaten kayıtlı"
-            raw.startsWith("INVALID_LOGIN_CREDENTIALS") || raw.startsWith("INVALID_PASSWORD") || raw.startsWith("EMAIL_NOT_FOUND") -> "Telefon veya şifre hatalı"
+            raw.startsWith("EMAIL_EXISTS") -> "Bu Gmail adresi zaten kayıtlı, giriş yapın"
+            raw.startsWith("INVALID_EMAIL") -> "Geçersiz e-posta adresi"
+            raw.startsWith("INVALID_LOGIN_CREDENTIALS") || raw.startsWith("INVALID_PASSWORD") || raw.startsWith("EMAIL_NOT_FOUND") -> "Gmail veya şifre hatalı"
             raw.startsWith("WEAK_PASSWORD") -> "Şifre en az 6 karakter olmalı"
             raw.startsWith("OPERATION_NOT_ALLOWED") -> "Firebase'de E-posta/Şifre girişi açık değil"
             raw.startsWith("TOO_MANY_ATTEMPTS") -> "Çok fazla deneme, biraz bekleyin"
@@ -100,13 +144,14 @@ object TaxiStore {
     }
 
     private fun httpText(method: String, url: String, body: String?, token: String?,
-                         contentType: String = "application/json"): String {
+                         contentType: String = "application/json", extraHeaders: Map<String, String> = emptyMap()): String {
         val c = URL(url).openConnection() as HttpURLConnection
         try {
             c.requestMethod = method
             c.connectTimeout = 10000
             c.readTimeout = 15000
             if (token != null) c.setRequestProperty("Authorization", "Bearer $token")
+            for ((k, v) in extraHeaders) c.setRequestProperty(k, v)
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", contentType)
@@ -120,10 +165,8 @@ object TaxiStore {
     }
 
     // ---------- Giriş / kayıt (Firebase Authentication) ----------
-    private fun emailOf(phone: String) = "p" + phone.filter { it.isDigit() } + "@rotaplay-taksi.app"
-
-    private fun authCall(endpoint: String, phone: String, pass: String) {
-        val body = JSONObject().put("email", emailOf(phone)).put("password", pass).put("returnSecureToken", true)
+    private fun authCall(endpoint: String, mail: String, pass: String) {
+        val body = JSONObject().put("email", mail).put("password", pass).put("returnSecureToken", true)
         val j = JSONObject(httpText("POST", "https://identitytoolkit.googleapis.com/v1/accounts:$endpoint?key=$FB_API_KEY", body.toString(), null))
         authUid = j.getString("localId")
         idToken = j.getString("idToken")
@@ -148,13 +191,20 @@ object TaxiStore {
         val uid = driverId.ifEmpty { authUid }
         fsWrite("drivers/$uid", mapOf(
             "name" to name, "phone" to phone, "plate" to plate,
-            "status" to "pending", "createdAt" to System.currentTimeMillis()))
+            "email" to email, "iban" to iban, "vehicleType" to "yellow_taxi",
+            "status" to "pending", "createdAt" to System.currentTimeMillis(),
+            "identityPath" to "", "licensePath" to "", "registrationFrontPath" to "",
+            "registrationBackPath" to "", "docsStatus" to "missing", "autoCheck" to "not_run", "plateOcrResult" to "not_run"))
     }
 
-    fun register(c: Context, n: String, ph: String, pl: String, pass: String) {
-        if (n.isBlank() || pl.isBlank() || ph.filter { it.isDigit() }.length < 10) throw ApiError(400, "Ad, plaka ve geçerli bir telefon girin")
-        authCall("signUp", ph, pass)
-        name = n; plate = pl.uppercase(); phone = ph
+    fun register(c: Context, n: String, ph: String, em: String, pl: String, ib: String, pass: String) {
+        val mail = em.trim().lowercase()
+        val ibanN = normalizeIban(ib)
+        if (n.isBlank() || pl.isBlank() || ph.filter { it.isDigit() }.length < 10) throw ApiError(400, "Ad soyad, plaka ve geçerli bir telefon girin")
+        if (!Regex("^[a-z0-9._%+-]+@gmail\\.com$").matches(mail)) throw ApiError(400, "Geçerli bir Gmail adresi girin")
+        if (!ibanValid(ibanN)) throw ApiError(400, "IBAN geçersiz. TR ile başlayan 26 karakterlik IBAN girin")
+        authCall("signUp", mail, pass)
+        name = n; plate = pl.uppercase(); phone = ph; email = mail; iban = ibanN; verified = false
         var ok = true
         try {
             createProfile()                      // önce şoför belgesi yazılır...
@@ -162,20 +212,146 @@ object TaxiStore {
             ok = false
             message = "Hesap açıldı ama şoför kaydı yazılamadı: " + (if (e is ApiError) e.message else "bağlantı hatası")
         }
-        driverId = authUid                       // ...sonra ekran taksi sayfasına geçer
+        driverId = authUid                       // ...sonra ekran doğrulama sayfasına geçer
         saveSession(c)
+        try { sendVerification() } catch (e: Exception) { if (ok) message = "Doğrulama e-postası gönderilemedi, ekrandaki düğmeyle tekrar deneyin" }
         if (!ok) return
-        message = ""
         track("kayit_oldu", plate)
-        refreshMe()
     }
 
-    fun login(c: Context, ph: String, pass: String) {
-        authCall("signInWithPassword", ph, pass)
-        driverId = authUid
-        phone = ph
+    // ---------- Gmail doğrulama / şifre sıfırlama / IBAN ----------
+    private fun idUrl(op: String) = "https://identitytoolkit.googleapis.com/v1/accounts:$op?key=$FB_API_KEY"
+    private val trLocale = mapOf("X-Firebase-Locale" to "tr")
+
+    /** Firebase, kayıtlı Gmail adresine doğrulama bağlantısı gönderir. */
+    fun sendVerification() {
+        val body = JSONObject().put("requestType", "VERIFY_EMAIL").put("idToken", token())
+        httpText("POST", idUrl("sendOobCode"), body.toString(), null, extraHeaders = trLocale)
+    }
+
+    /** Gmail doğrulandı mı diye Firebase'e sorar; doğrulandıysa yeni belirteç (email_verified=true) alınır. */
+    fun checkVerified(c: Context): Boolean {
+        val body = JSONObject().put("idToken", token())
+        val j = JSONObject(httpText("POST", idUrl("lookup"), body.toString(), null))
+        val ok = j.getJSONArray("users").getJSONObject(0).optBoolean("emailVerified", false)
+        if (ok && !verified) tokenExp = 0L
+        verified = ok
         saveSession(c)
-        refreshMe(c)
+        return ok
+    }
+
+    fun resetPassword(em: String) {
+        val body = JSONObject().put("requestType", "PASSWORD_RESET").put("email", em.trim().lowercase())
+        httpText("POST", idUrl("sendOobCode"), body.toString(), null, extraHeaders = trLocale)
+    }
+
+    /** Şoför kendi IBAN'ını güncelleyebilir (Firestore kuralı yalnızca bu alanı açar). */
+    fun updateIban(c: Context, raw: String) {
+        val n = normalizeIban(raw)
+        if (!ibanValid(n)) throw ApiError(400, "IBAN geçersiz. TR ile başlayan 26 karakterlik IBAN girin")
+        fsWrite("drivers/${driverId.ifEmpty { authUid }}", mapOf("iban" to n))
+        iban = n
+        saveSession(c)
+    }
+
+    /**
+     * Belgeyi Firebase Storage'a özel (private) yükler; dosya yolu Firestore profilinde tutulur.
+     * docType: identity | license | registrationFront | registrationBack
+     */
+    fun uploadDriverDocument(c: Context, uri: Uri, docType: String) {
+        val allowed = setOf("identity", "license", "registrationFront", "registrationBack")
+        if (docType !in allowed) throw ApiError(400, "Geçersiz belge türü")
+        val uid = driverId.ifEmpty { authUid }
+        if (uid.isBlank()) throw ApiError(401, "Önce giriş yapın")
+        var thisOcr = "not_applicable"
+        if (docType == "registrationFront" || docType == "registrationBack") {
+            try {
+                val image = InputImage.fromFilePath(c, uri)
+                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                val recognized = try { Tasks.await(recognizer.process(image), 25, TimeUnit.SECONDS).text } finally { recognizer.close() }
+                val compactText = recognized.uppercase().replace(Regex("[^0-9A-Z]"), "")
+                val expected = plate.uppercase().replace(Regex("[^0-9A-Z]"), "")
+                val candidates = Regex("[0-9]{2}[A-Z]{1,3}[0-9]{2,4}").findAll(compactText).map { it.value }.toList()
+                thisOcr = when {
+                    expected.isNotBlank() && compactText.contains(expected) -> "match"
+                    candidates.isNotEmpty() -> "mismatch"
+                    else -> "unreadable"
+                }
+            } catch (_: Exception) { thisOcr = "unreadable" }
+        }
+        val bytes = c.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw ApiError(400, "Dosya okunamadı")
+        if (bytes.isEmpty() || bytes.size > 12 * 1024 * 1024) throw ApiError(400, "Dosya boş veya 12 MB sınırını aşıyor")
+        val mime = c.contentResolver.getType(uri) ?: "image/jpeg"
+        if (!mime.startsWith("image/")) throw ApiError(400, "Yalnızca fotoğraf yükleyebilirsiniz")
+        val objectPath = "driver-documents/$uid/$docType"
+        val bucket = "rotaplay-taksi.firebasestorage.app"
+        val encodedPath = URLEncoder.encode(objectPath, "UTF-8").replace("+", "%20")
+        val conn = URL("https://firebasestorage.googleapis.com/v0/b/$bucket/o?uploadType=media&name=$encodedPath").openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 20000
+            conn.readTimeout = 30000
+            conn.doOutput = true
+            conn.setRequestProperty("Authorization", "Bearer ${token()}")
+            conn.setRequestProperty("Content-Type", mime)
+            conn.outputStream.use { it.write(bytes) }
+            val code = conn.responseCode
+            val response = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
+            if (code !in 200..299) throw ApiError(code, "Belge yüklenemedi: $response")
+        } finally { conn.disconnect() }
+
+        val field = when (docType) {
+            "identity" -> "identityPath"
+            "license" -> "licensePath"
+            "registrationFront" -> "registrationFrontPath"
+            else -> "registrationBackPath"
+        }
+        val values = mutableMapOf<String, Any?>(field to objectPath)
+        val paths = mapOf(
+            "identityPath" to if (docType == "identity") objectPath else docIdentityPath,
+            "licensePath" to if (docType == "license") objectPath else docLicensePath,
+            "registrationFrontPath" to if (docType == "registrationFront") objectPath else docRegFrontPath,
+            "registrationBackPath" to if (docType == "registrationBack") objectPath else docRegBackPath
+        )
+        val complete = paths.values.all { it.isNotBlank() }
+        val normalizedPlate = plate.uppercase().replace(" ", "")
+        val plateFormatOk = Regex("^[0-9]{2}[A-Z]{1,3}[0-9]{2,4}$").matches(normalizedPlate)
+        val previousOcr = plateOcrResult
+        val combinedOcr = when {
+            thisOcr == "match" || previousOcr == "match" -> "match"
+            thisOcr == "mismatch" && previousOcr == "mismatch" -> "mismatch"
+            thisOcr == "unreadable" || previousOcr == "unreadable" -> "unreadable"
+            else -> previousOcr
+        }
+        if (docType == "registrationFront" || docType == "registrationBack") values["plateOcrResult"] = combinedOcr
+        val check = when {
+            !complete -> "incomplete"
+            !plateFormatOk || combinedOcr == "mismatch" -> "suspicious"
+            combinedOcr == "match" -> "review_required"
+            else -> "manual_review"
+        }
+        values["docsStatus"] = if (complete) "submitted" else "incomplete"
+        values["autoCheck"] = check
+        fsWrite("drivers/$uid", values)
+        when (docType) {
+            "identity" -> docIdentityPath = objectPath
+            "license" -> docLicensePath = objectPath
+            "registrationFront" -> docRegFrontPath = objectPath
+            "registrationBack" -> docRegBackPath = objectPath
+        }
+        docsStatus = values["docsStatus"].toString()
+        autoCheck = check
+        plateOcrResult = combinedOcr
+    }
+
+    fun login(c: Context, em: String, pass: String) {
+        val mail = em.trim().lowercase()
+        authCall("signInWithPassword", mail, pass)
+        driverId = authUid
+        email = mail
+        saveSession(c)
+        if (checkVerified(c)) refreshMe(c)
         track("giris_yapti")
     }
 
@@ -298,6 +474,14 @@ object TaxiStore {
             val d = fsGet("drivers/$driverId")
             if (d == null) { status = ""; message = "Şoför kaydı bulunamadı"; return }
             name = d.optString("name"); plate = d.optString("plate"); phone = d.optString("phone"); status = d.optString("status")
+            iban = d.optString("iban")
+            docIdentityPath = d.optString("identityPath")
+            docLicensePath = d.optString("licensePath")
+            docRegFrontPath = d.optString("registrationFrontPath")
+            docRegBackPath = d.optString("registrationBackPath")
+            docsStatus = d.optString("docsStatus", "missing")
+            autoCheck = d.optString("autoCheck", "not_run")
+            plateOcrResult = d.optString("plateOcrResult", "not_run")
             if (message.startsWith("Şoför kaydı bulunamadı")) message = ""
             if (c != null) saveSession(c)
             if (status != "approved") return
@@ -324,7 +508,9 @@ object TaxiStore {
             val d = fsGet("rides/${cur.id}")
             if (d != null && d.optString("status") == "cancelled") {
                 current = null; message = "Yolcu yolculuğu iptal etti"; changePhase("")
-            } else if (d != null && (phase == "to_pickup" || phase == "on_trip")) pushLocation(cur.id)
+            } else if (d != null && (phase == "to_pickup" || phase == "on_trip")) {
+                pushLocation(cur.id)
+            }
             return null
         }
         val now = System.currentTimeMillis()
@@ -376,7 +562,7 @@ object TaxiStore {
             try {
                 fsWrite("rides/${r.id}", mapOf(
                     "status" to "accepted", "driverUid" to driverId, "driverName" to name, "driverPlate" to plate,
-                    "driverPhone" to phone, "acceptedAt" to System.currentTimeMillis(), "driverCancelled" to false,
+                    "driverIban" to iban, "driverPhone" to phone, "acceptedAt" to System.currentTimeMillis(), "driverCancelled" to false,
                     "driverLat" to la, "driverLon" to lo
                 ), d.optString("_ut"))
             } catch (e: ApiError) { throw ApiError(409, "Bu yolculuğu başka şoför aldı, iptal edildi veya 5 km dışında") }
@@ -410,7 +596,7 @@ object TaxiStore {
                 if (arr != null) for (i in 0 until arr.length()) declined.add(arr.getString(i))
                 if (!declined.contains(driverId)) declined.add(driverId)
                 fsWrite("rides/${r.id}", mapOf(
-                    "status" to "searching", "driverUid" to null, "driverName" to "", "driverPlate" to "", "driverPhone" to "",
+                    "status" to "searching", "driverUid" to null, "driverName" to "", "driverPlate" to "", "driverIban" to "", "driverPhone" to "",
                     "driverCancelled" to true, "declined" to declined, "createdAt" to System.currentTimeMillis(),
                     "driverLat" to null, "driverLon" to null
                 ))

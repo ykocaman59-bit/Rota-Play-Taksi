@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -34,11 +35,16 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 import org.json.JSONObject
 
 @Composable
 fun TaxiPage(onHome: () -> Unit) {
-    if (TaxiStore.driverId.isEmpty()) TaxiAuth() else TaxiMain(onHome)
+    when {
+        TaxiStore.driverId.isEmpty() -> TaxiAuth()
+        !TaxiStore.verified -> TaxiVerify()
+        else -> TaxiMain(onHome)
+    }
 }
 
 @Composable
@@ -60,42 +66,181 @@ private fun Card(content: @Composable ColumnScope.() -> Unit) {
     )
 }
 
-// ---------- Kayıt / giriş ----------
+// ---------- Kayıt / giriş (Gmail ile) ----------
 @Composable
 private fun TaxiAuth() {
     val ctx = LocalContext.current.applicationContext
-    var register by rememberSaveable { mutableStateOf(true) }
+    var mode by rememberSaveable { mutableStateOf("register") }      // register | login | forgot
     var name by rememberSaveable { mutableStateOf("") }
     var phone by rememberSaveable { mutableStateOf("") }
+    var email by rememberSaveable { mutableStateOf("") }
     var plate by rememberSaveable { mutableStateOf("") }
+    var iban by rememberSaveable { mutableStateOf("TR") }
     var pass by rememberSaveable { mutableStateOf("") }
+    var yellow by rememberSaveable { mutableStateOf(false) }
     var err by remember { mutableStateOf("") }
+    var ok by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(if (register) "Şoför kaydı" else "Şoför girişi", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-        if (register) {
-            Text("Kayıttan sonra hesabınız onaylanınca talep alabilirsiniz.", color = Color.White.copy(alpha = 0.7f))
+        Text(when (mode) { "register" -> "Sarı taksi şoförü kaydı"; "login" -> "Şoför girişi"; else -> "Şifremi unuttum" }, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        if (mode == "register") {
+            Text("Bu uygulama yalnızca sarı (ticari) taksiler içindir. Kayıttan sonra Gmail adresinizi doğrulamanız ve hesabınızın onaylanması gerekir.", color = Color.White.copy(alpha = 0.7f))
             Field("Ad soyad", name) { name = it }
             Field("Plaka", plate) { plate = it }
+            Field("Telefon", phone, KeyboardType.Phone) { phone = it }
         }
-        Field("Telefon", phone, KeyboardType.Phone) { phone = it }
-        Field("Şifre (en az 6 karakter)", pass, secret = true) { pass = it }
+        Field("Gmail adresi", email, KeyboardType.Email) { email = it }
+        if (mode != "forgot") Field(if (mode == "register") "Şifre (en az 6 karakter)" else "Şifre", pass, secret = true) { pass = it }
+        if (mode == "register") {
+            Field("IBAN (TR ile başlar)", iban) { iban = it }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { yellow = !yellow }) {
+                Checkbox(checked = yellow, onCheckedChange = { yellow = it })
+                Text("Sarı (ticari) taksi şoförüyüm; plaka ve belgelerim bunu doğrular.", modifier = Modifier.weight(1f))
+            }
+        }
         if (err.isNotEmpty()) Text(err, color = Color(0xFFFF6B5E))
+        if (ok.isNotEmpty()) Text(ok, color = Color(0xFF46C37B))
         Button(enabled = !busy, modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
-            busy = true; err = ""
+            if (mode == "register" && !yellow) { err = "Devam etmek için sarı taksi şoförü olduğunuzu onaylayın"; return@Button }
+            busy = true; err = ""; ok = ""
             TaxiStore.bg {
                 try {
-                    if (register) TaxiStore.register(ctx, name.trim(), phone.trim(), plate.trim(), pass)
-                    else TaxiStore.login(ctx, phone.trim(), pass)
+                    when (mode) {
+                        "register" -> TaxiStore.register(ctx, name.trim(), phone.trim(), email.trim(), plate.trim(), iban, pass)
+                        "login" -> TaxiStore.login(ctx, email.trim(), pass)
+                        else -> { TaxiStore.resetPassword(email); ok = "Bu adres kayıtlıysa şifre yenileme bağlantısı gönderildi. Spam klasörüne de bakın." }
+                    }
                 } catch (e: ApiError) { err = e.message ?: "Hata" }
                 catch (e: Exception) { err = "Bağlanılamadı, internetinizi kontrol edin" }
                 busy = false
             }
-        }) { Text(if (busy) "Bekleyin…" else if (register) "Kayıt ol" else "Giriş yap", fontSize = 17.sp) }
-        OutlinedButton(onClick = { register = !register; err = "" }, modifier = Modifier.fillMaxWidth()) {
-            Text(if (register) "Zaten hesabım var" else "Yeni kayıt oluştur")
+        }) { Text(if (busy) "Bekleyin…" else when (mode) { "register" -> "Kayıt ol"; "login" -> "Giriş yap"; else -> "Bağlantı gönder" }, fontSize = 17.sp) }
+        if (mode == "login") OutlinedButton(onClick = { mode = "forgot"; err = ""; ok = "" }, modifier = Modifier.fillMaxWidth()) { Text("Şifremi unuttum") }
+        OutlinedButton(onClick = { mode = if (mode == "register") "login" else "register"; err = ""; ok = "" }, modifier = Modifier.fillMaxWidth()) {
+            Text(if (mode == "register") "Zaten hesabım var" else "Yeni kayıt oluştur")
         }
+    }
+}
+
+// ---------- Gmail doğrulama ekranı ----------
+@Composable
+private fun TaxiVerify() {
+    val ctx = LocalContext.current.applicationContext
+    val s = TaxiStore
+    var info by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var cooldown by remember { mutableIntStateOf(60) }
+    LaunchedEffect(cooldown) { if (cooldown > 0) { delay(1000); cooldown -= 1 } }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Gmail adresinizi doğrulayın", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Text("${s.email} adresine bir doğrulama bağlantısı gönderdik. Gmail'i açıp bağlantıya dokunun, sonra buraya dönüp \"Doğruladım\" düğmesine basın. Gelmediyse spam klasörüne bakın.",
+            color = Color.White.copy(alpha = 0.8f))
+        if (s.message.isNotEmpty()) Text(s.message, color = Color(0xFFFFC857))
+        if (info.isNotEmpty()) Text(info, color = Color(0xFFFFD166))
+        Button(enabled = !busy, modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
+            busy = true; info = ""
+            s.bg {
+                try {
+                    if (s.checkVerified(ctx)) { s.message = ""; s.refreshMe(ctx) }
+                    else info = "Henüz doğrulanmamış. Gmail'deki bağlantıya dokunduktan sonra tekrar deneyin."
+                } catch (e: Exception) { info = if (e is ApiError) (e.message ?: "Hata") else "Bağlanılamadı, internetinizi kontrol edin" }
+                busy = false
+            }
+        }) { Text(if (busy) "Kontrol ediliyor…" else "Doğruladım", fontSize = 17.sp) }
+        OutlinedButton(enabled = !busy && cooldown == 0, modifier = Modifier.fillMaxWidth(), onClick = {
+            busy = true; info = ""
+            s.bg {
+                try { s.sendVerification(); info = "Bağlantı tekrar gönderildi."; cooldown = 60 }
+                catch (e: Exception) { info = if (e is ApiError) (e.message ?: "Hata") else "Bağlanılamadı" }
+                busy = false
+            }
+        }) { Text(if (cooldown > 0) "Bağlantıyı tekrar gönder ($cooldown sn)" else "Bağlantıyı tekrar gönder") }
+        OutlinedButton(onClick = { s.logout(ctx) }, modifier = Modifier.fillMaxWidth()) { Text("Çıkış yap / farklı hesap") }
+    }
+}
+
+// ---------- IBAN kartı ----------
+@Composable
+private fun IbanCard() {
+    val ctx = LocalContext.current.applicationContext
+    val s = TaxiStore
+    var edit by remember { mutableStateOf(false) }
+    var v by remember { mutableStateOf("") }
+    var err by remember { mutableStateOf("") }
+    Card {
+        Text("IBAN bilgisi", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        if (!edit) {
+            Text(if (s.iban.isBlank()) "Eklenmemiş" else s.iban.chunked(4).joinToString(" "))
+            Text("Yolcu, şoför profilinizde bu IBAN'ı görür ve kopyalayabilir.", fontSize = 12.sp, color = Color.White.copy(alpha = 0.6f))
+            OutlinedButton(onClick = { v = s.iban.ifBlank { "TR" }; err = ""; edit = true }, modifier = Modifier.fillMaxWidth()) { Text(if (s.iban.isBlank()) "IBAN ekle" else "IBAN'ı düzenle") }
+        } else {
+            Field("IBAN (TR ile başlar)", v) { v = it }
+            if (err.isNotEmpty()) Text(err, color = Color(0xFFFF6B5E))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(modifier = Modifier.weight(1f), onClick = {
+                    s.bg {
+                        try { s.updateIban(ctx, v); edit = false }
+                        catch (e: Exception) { err = if (e is ApiError) (e.message ?: "Hata") else "Kaydedilemedi, internetinizi kontrol edin" }
+                    }
+                }) { Text("Kaydet") }
+                OutlinedButton(modifier = Modifier.weight(1f), onClick = { edit = false }) { Text("Vazgeç") }
+            }
+        }
+    }
+}
+
+// ---------- Kimlik / ehliyet / ruhsat belgeleri ----------
+@Composable
+private fun DriverDocuments() {
+    val ctx = LocalContext.current.applicationContext
+    val s = TaxiStore
+    var busy by remember { mutableStateOf(false) }
+    var info by remember { mutableStateOf("") }
+
+    fun upload(uri: Uri?, kind: String) {
+        if (uri == null) return
+        busy = true
+        info = "Belge yükleniyor…"
+        s.bg {
+            try {
+                s.uploadDriverDocument(ctx, uri, kind)
+                info = "Belge yüklendi. Diğer belgeleri de tamamlayın."
+            } catch (e: Exception) {
+                info = e.message ?: "Belge yüklenemedi"
+            }
+            busy = false
+        }
+    }
+    val identityPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "identity") }
+    val licensePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "license") }
+    val frontPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "registrationFront") }
+    val backPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { upload(it, "registrationBack") }
+
+    Card {
+        Text("Şoför belge doğrulaması", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text("Hesabınızın açılması için dört belge fotoğrafını yükleyin. Belgeler yalnızca siz ve yetkili yönetici tarafından görüntülenebilir.")
+        Text("Kimlik: ${if (s.docIdentityPath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { identityPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Kimlik fotoğrafı yükle") }
+        Text("Ehliyet: ${if (s.docLicensePath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { licensePicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Ehliyet fotoğrafı yükle") }
+        Text("Ruhsat ön yüz: ${if (s.docRegFrontPath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { frontPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Ruhsat ön yüzünü yükle") }
+        Text("Ruhsat arka yüz: ${if (s.docRegBackPath.isNotBlank()) "Yüklendi ✓" else "Eksik"}")
+        OutlinedButton(enabled = !busy, onClick = { backPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) { Text("Ruhsat arka yüzünü yükle") }
+        if (info.isNotBlank()) Text(info, color = Color(0xFFFFD166))
+        Text(
+            when (s.autoCheck) {
+                "review_required" -> "Ön kontrol: Plaka OCR eşleşti; yönetici incelemesi bekleniyor."
+                "suspicious" -> "Ön kontrol: Plaka biçimi/eşleşmesi şüpheli. Yönetici inceleyecek."
+                "manual_review" -> "Ön kontrol: OCR plakayı okuyamadı; yönetici inceleyecek."
+                "incomplete" -> "Ön kontrol: Eksik belge var."
+                else -> "Durum: Belgeler bekleniyor."
+            },
+            color = Color.White.copy(alpha = 0.75f)
+        )
+        Text("Not: OCR yalnızca fotoğraftaki yazıyı okur; belge sahteciliğini veya resmî kayıt eşleşmesini kanıtlamaz. Son karar yönetici incelemesidir.", fontSize = 12.sp, color = Color.White.copy(alpha = 0.6f))
     }
 }
 
@@ -113,7 +258,7 @@ private fun TaxiMain(onHome: () -> Unit) {
 
     fun goOnline() {
         when {
-            s.status != "approved" -> s.message = "Hesabınız henüz onaylanmadı"
+            s.status != "approved" || s.docsStatus != "submitted" -> s.message = "Hesabınız ve belgeleriniz henüz yönetici tarafından onaylanmadı"
             !Settings.canDrawOverlays(ctx) -> {
                 s.message = "Yandex'in üstünde düğme gösterebilmek için izin verin, sonra tekrar basın"
                 open(ctx, Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}")))
@@ -138,9 +283,10 @@ private fun TaxiMain(onHome: () -> Unit) {
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (s.status != "approved" || s.docsStatus != "submitted") DriverDocuments()
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Taksi", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Text("Sarı Taksi", fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text(
                     listOf(s.name, s.plate).filter { it.isNotBlank() }.joinToString("  ") +
                         (s.rating?.let { "  ★ $it" } ?: ""),
@@ -199,6 +345,7 @@ private fun TaxiMain(onHome: () -> Unit) {
                 }
             }
         }
+        if (s.status.isNotEmpty() && s.current == null) IbanCard()
     }
 }
 
