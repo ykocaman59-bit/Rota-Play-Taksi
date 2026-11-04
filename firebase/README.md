@@ -31,3 +31,14 @@ Günde 50.000 okuma, 20.000 yazma, 1 GiB. Şoför uygulaması talepleri 6 sn'de 
 - Storage kuralları yöneticinin `admins/{uid}` Firestore kaydını okur. Firebase Console isterse Storage'ın Firestore'a erişim iznini onayla.
 - Şoför uygulaması dört belgeyi Storage'a yükler. Yönetici fotoğrafları yolcu projesindeki `docs/admin.html` panelinden açar.
 - OCR yalnızca fotoğraftaki yazıyı okumaya çalışır; resmî doğrulama değildir. Son karar yönetici incelemesidir.
+
+
+## Sarı taksi güncellemesi (Gmail doğrulama, IBAN)
+
+1. **Firestore → Rules**: güncel `firestore.rules` dosyasının TAMAMINI yapıştırıp **Publish** et.
+   (Yeni: IBAN, puan özetleri `driverStats`/`passengerStats`, seviyeye göre yarıçap, şoför için doğrulanmış Gmail şartı.)
+2. **Authentication → Sign-in method → Email/Password** açık olmalı (doğrulama e-postaları buradan gider).
+3. Şoförler artık **Gmail + şifre** ile girer. Eski telefon numaralı test hesapları çalışmaz; yeniden kayıt gerekir.
+4. Yeni kayıtlarda şoför Gmail'ini doğrulamadan uygulamaya giremez ve talep alamaz.
+
+Not: Uygulama içi mesajlaşma ve sesli arama şimdilik yoktur (ileride eklenecek).
